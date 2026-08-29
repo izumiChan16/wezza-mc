@@ -1,12 +1,13 @@
 # Wezza MC 使用手册
 
-这是 Wezza MC 私人模组服务器的完整管理文档。服务器运行在自己的 Windows 电脑上：需要玩时手动启动，不玩时安全关闭。
+这是 Wezza MC 私人模组服务器的综合使用文档。服务器运行在自己的 Windows 电脑上：需要玩时手动启动，不玩时安全关闭。
 
 - 服务器信息页：<https://izumichan16.github.io/wezza-mc/>
 - GitHub 仓库：<https://github.com/izumiChan16/wezza-mc>
 - 项目目录：`/home/izumi/wezza_mc`
+- 管理员详细手册：[docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md)
 
-如果你只是来玩的，请直接阅读[玩家加入方法](#玩家加入方法)。如果你负责开服和修改模组，请从头阅读本文。
+如果你只是来玩的，请直接阅读[玩家加入方法](#玩家加入方法)。如果你负责开服、备份、修改模组或发布整合包，请使用独立的[管理员详细手册](docs/ADMIN_GUIDE.md)；本文保留整体说明和常用流程。
 
 ## 目录
 
@@ -914,6 +915,7 @@ runtime/backups/offline/
 ```text
 wezza_mc/
 ├── .github/workflows/     GitHub 自动校验和 Pages 发布
+├── docs/                  独立的管理员详细手册
 ├── pack/                  模组清单、版本与再分发批准
 │   └── mods/              每个模组的 Packwiz 元数据
 ├── runtime/               世界、备份、测试服数据，不提交
