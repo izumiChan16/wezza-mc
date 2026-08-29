@@ -6,6 +6,11 @@ hash = "8e6033c2642308835d119a073fdf24306394cdb6985c482a08e67b8087f6e90d"
 metafile = true
 
 [[files]]
+file = "mods/chunky.pw.toml"
+hash = "c3e4fe1c4469a4cbad5fc201fe7083166b6bf3cab7edb23398a317b4c29bd727"
+metafile = true
+
+[[files]]
 file = "mods/fabric-api.pw.toml"
 hash = "6f89d349cbad7c499f7a33b145b3897ca3f097e959c7c264f8058fa933ae28f3"
 metafile = true
