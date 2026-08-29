@@ -1,12 +1,12 @@
 name = "Wezza MC"
 author = "Wezza MC"
-version = "26.1.2-r1"
+version = "26.1.2-r2"
 pack-format = "packwiz:1.1.0"
 
 [index]
 file = "index.toml"
 hash-format = "sha256"
-hash = "8503f1aa9917a5f1a34c4170babbe31cbbbf549ac08036feffd359555f158331"
+hash = "15eaa1777dd6956751027272e273532002306f1edbdc696447447eb9662ed7f6"
 
 [versions]
 fabric = "0.19.3"

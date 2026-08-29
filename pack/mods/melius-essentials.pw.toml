@@ -1,0 +1,13 @@
+name = "Fabric Essentials"
+filename = "fabric-essentials-1.4.11+26.1.2.jar"
+side = "server"
+
+[download]
+url = "https://cdn.modrinth.com/data/o69N0FT2/versions/dRQhbixA/fabric-essentials-1.4.11%2B26.1.2.jar"
+hash-format = "sha512"
+hash = "3ad49d687bf95cf2b3dea83ae4bff6324b3628a3ddfd2af12a0bf1912169f71904926deb484e47f0f7892fa753f00664905b3473c96565400ba4e398d3a1100c"
+
+[update]
+[update.modrinth]
+mod-id = "o69N0FT2"
+version = "dRQhbixA"
