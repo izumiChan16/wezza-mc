@@ -68,6 +68,7 @@ def validate(pack_dir: Path) -> tuple[list[dict], list[str], list[str]]:
 
     for mod_path in sorted((pack_dir / "mods").glob("*.pw.toml")):
         rel = mod_path.relative_to(pack_dir).as_posix()
+        slug = mod_path.name.removesuffix(".pw.toml")
         try:
             mod = load_toml(mod_path)
         except ValueError as exc:
@@ -146,6 +147,7 @@ def validate(pack_dir: Path) -> tuple[list[dict], list[str], list[str]]:
 
         result.append(
             {
+                "slug": slug,
                 "name": name,
                 "filename": filename,
                 "side": side,
@@ -186,9 +188,31 @@ def main() -> int:
 
     mods, errors, warnings = validate(args.pack_dir.resolve())
     if mods:
-        print(f"{'SIDE':<8} {'SOURCE':<12} MOD")
-        for mod in mods:
-            print(f"{mod['side']:<8} {mod['source']:<12} {mod['name']}")
+        headers = ("SLUG", "SIDE", "SOURCE", "MOD")
+        rows = [
+            (
+                str(mod["slug"]),
+                str(mod["side"] or ""),
+                str(mod["source"]),
+                str(mod["name"]),
+            )
+            for mod in mods
+        ]
+        widths = [
+            max(len(header), *(len(row[index]) for row in rows))
+            for index, header in enumerate(headers)
+        ]
+        print(
+            "  ".join(
+                f"{header:<{widths[index]}}" for index, header in enumerate(headers)
+            ).rstrip()
+        )
+        for row in rows:
+            print(
+                "  ".join(
+                    f"{value:<{widths[index]}}" for index, value in enumerate(row)
+                ).rstrip()
+            )
         counts = {side: sum(mod["side"] == side for mod in mods) for side in sorted(VALID_SIDES)}
         print(
             f"\nImpact: {counts['server']} server-only, "

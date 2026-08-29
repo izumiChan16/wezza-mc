@@ -2,7 +2,7 @@
 
 本文是 Wezza MC 服务器管理员的操作手册，适用于当前仓库中的 Fabric 26.1.2、Docker Compose、Packwiz、标准 Modrinth `.mrpack` 和 GitHub Pages 发布流程。
 
-文档基线：2026-08-29，整合包 `26.1.2-r1`。
+文档基线：2026-08-29。整合包版本和模组数量以仓库中的 `pack/` 为准。
 
 项目位置：
 
@@ -28,6 +28,7 @@ cd /home/izumi/wezza_mc
 - [首次部署](#3-首次部署)
 - [本机配置](#4-本机配置说明)
 - [日常开服与关服](#5-日常开服与关服)
+- [世界状态与重置](#世界状态与重置)
 - [白名单和 OP](#6-玩家白名单和-op)
 - [添加、更新、删除模组](#7-模组变更的完整生命周期)
 - [隔离测试服](#8-隔离测试服)
@@ -48,15 +49,16 @@ cd /home/izumi/wezza_mc
 ## 1. 管理员首先要记住的规则
 
 1. **正式世界在 `runtime/data/`。** 不要手工清空、覆盖或与测试服目录混用。
-2. **开服用 `./mcctl start`，关服用 `./mcctl stop`。** 不要用 Docker Desktop 的强制停止代替正常关服。
-3. **任何模组变化先进入隔离测试服。** 测试通过并执行 `stage accept` 后才能发布。
-4. **`.mrpack` 是版本快照，不是自动同步器。** 小更新由已有玩家按更新页手动操作；完整更新要求重新导入。
-5. **正式发布只从 `main` 分支执行。** `mod publish` 会生成版本号、更新记录、提交并推送。
-6. **非 Modrinth 文件默认禁止发布。** 必须先核对作者许可并登记准确的元数据哈希。
-7. **服务器只应暴露游戏端口。** 不要向公网转发 RCON、测试服端口、Docker API 或 WSL 的其他服务。
-8. **Git 不能代替世界备份。** 仓库保存程序和模组清单，世界、`.env` 和密钥不在 Git 中。
-9. **Minecraft 新版本保存过的世界通常不能安全降级。** 大版本升级前必须验证可恢复备份。
-10. **这里所谓的“插件”应当是 Fabric 模组。** Bukkit、Spigot、Paper 插件不能直接装进这个服务器。
+2. **世界状态和重置使用 `./mcctl world`。** 重置会先备份并归档旧世界。
+3. **开服用 `./mcctl start`，关服用 `./mcctl stop`。** 不要用 Docker Desktop 的强制停止代替正常关服。
+4. **任何模组变化先进入隔离测试服。** 测试通过并执行 `stage accept` 后才能发布。
+5. **`.mrpack` 是版本快照，不是自动同步器。** 小更新由已有玩家按更新页手动操作；完整更新要求重新导入。
+6. **正式发布只从 `main` 分支执行。** `mod publish` 会生成版本号、更新记录、提交并推送。
+7. **非 Modrinth 文件默认禁止发布。** 必须先核对作者许可并登记准确的元数据哈希。
+8. **服务器只应暴露游戏端口。** 不要向公网转发 RCON、测试服端口、Docker API 或 WSL 的其他服务。
+9. **Git 不能代替世界备份。** 仓库保存程序和模组清单，世界、`.env` 和密钥不在 Git 中。
+10. **Minecraft 新版本保存过的世界通常不能安全降级。** 大版本升级前必须验证可恢复备份。
+11. **这里所谓的“插件”应当是 Fabric 模组。** Bukkit、Spigot、Paper 插件不能直接装进这个服务器。
 
 ## 2. 系统由哪些部分组成
 
@@ -111,6 +113,7 @@ GitHub Pages
 | `runtime/data/` | 正式服务器数据和世界 | 否 |
 | `runtime/backups/local/` | 运行期间生成的本机备份 | 否 |
 | `runtime/backups/offline/` | 停服状态快照 | 否 |
+| `runtime/world-archive/` | 世界重置前归档的旧世界 | 否 |
 | `runtime/staging/` | 隔离测试服数据和接受记录 | 否 |
 | `runtime/removed-mods/` | 被移除模组元数据的临时保留位置 | 否 |
 | `secrets/` | RCON、restic 和 S3 密钥 | 真实值不提交 |
@@ -124,16 +127,14 @@ GitHub Pages
 | Minecraft | 26.1.2 |
 | Fabric Loader | 0.19.3 |
 | Java | 25 |
-| 整合包版本 | 26.1.2-r1 |
-| 双方模组 | Fabric API、FerriteCore、Refined Storage、Time in a Bottle |
-| 仅服务端 | Krypton、Lithium、ServerCore、spark |
-| 仅客户端 | Sodium |
+| 整合包版本 | 执行命令查询 |
+| 模组版本和安装侧 | 执行 `./mcctl mod list` 查询 |
 
-版本发布后这张表可能需要更新。实际权威数据始终是 `pack/pack.toml` 和 `pack/mods/`，可以执行：
+版本发布后不再手工维护模组总表。实际权威数据始终是 `pack/pack.toml` 和 `pack/mods/`，可以执行：
 
 ```bash
 python3 tools/release_pack.py version --pack-dir pack
-python3 tools/validate_pack.py pack
+./mcctl mod list
 ```
 
 ## 3. 首次部署
@@ -279,6 +280,8 @@ git diff -- pack
 | `PACKWIZ_URL` | Pages 地址 | 正式服清单地址 | 下次创建/启动服务端 |
 | `MC_PORT` | `25565` | 正式服本机端口 | 重新创建容器后 |
 | `STAGING_PORT` | `25566` | 测试服本机端口 | 重新创建测试容器后 |
+| `WORLD_NAME` | `world` | 正式世界目录名（单层安全目录名） | 下次启动 |
+| `WORLD_SEED` | 空 | 新世界生成的有符号 64 位整数；空值为随机 | 下次创建世界 |
 | `MEMORY` | `5G` | 正式服 Java 最大内存 | 下次启动 |
 | `STAGING_MEMORY` | `5G` | 测试服 Java 最大内存 | 下次测试启动 |
 | `TZ` | `Asia/Taipei` | 日志和备份时区 | 下次启动 |
@@ -295,6 +298,8 @@ git diff -- pack
 ```bash
 docker compose config --quiet
 ```
+
+如果修改了 `WORLD_NAME` 或 `WORLD_SEED`，用 `./mcctl world status` 检查配置。种子只影响下次创建的世界，不会改变已经存在的世界。
 
 端口变化时必须同步修改 Windows 内网穿透目标。
 
@@ -387,7 +392,7 @@ cd /home/izumi/wezza_mc
 ./mcctl console
 ```
 
-分离控制台依次按 `Ctrl+P`、`Ctrl+Q`。不要按 `Ctrl+C` 结束 Java 进程。
+命令会先显示连接成功和操作说明。控制台没有命令提示符，直接输入 Minecraft 命令并按 Enter，命令不要带 `/`。分离控制台依次按 `Ctrl+P`、`Ctrl+Q`；不要按 `Ctrl+C` 结束 Java 进程。退出后脚本会再次报告服务器是否仍在运行。
 
 ### 5.3 标准关服清单
 
@@ -423,6 +428,40 @@ cd /home/izumi/wezza_mc
 ```
 
 它等价于完整安全关服后再启动，因此可能先创建关服备份，再在启动前创建停服状态快照。维护窗口要为备份和启动下载预留时间。
+
+## 世界状态与重置
+
+### 查看状态
+
+```bash
+./mcctl world status
+```
+
+输出包括正式服务和 staging 状态、`WORLD_NAME` 对应的世界路径、世界目录是否存在、大小、最近修改时间、下次生成种子配置以及旧世界归档数量。已有世界的真实种子不会从 `level.dat` 中猜测；`Next generation seed` 只表示下次创建世界时 Compose 会使用的配置。
+
+### 安全重置
+
+重置是破坏性操作，但脚本会保留可恢复副本。开始前确认没有玩家在线，并执行：
+
+```bash
+./mcctl world reset --seed 123456789 --confirm
+```
+
+或者明确要求随机种子：
+
+```bash
+./mcctl world reset --random --confirm
+```
+
+要求和流程如下：
+
+1. 必须提供且只能提供一种种子模式；固定种子只能是有符号 64 位整数。
+2. 必须带 `--confirm`；正式 Minecraft、备份和 staging 服务必须全部停止。
+3. 脚本先创建完整停服快照，失败时不会移动世界。
+4. 现有世界移动到 `runtime/world-archive/<时间>-<世界名>/`，不会直接删除。
+5. 原子更新 `.env` 的 `WORLD_SEED`，不自动启动服务器。
+
+如果当前还没有世界，命令只会写入种子配置，下一次 `./mcctl start` 才会生成世界。重置后先再次执行 `./mcctl world status`，然后再启动并检查世界。确认新世界正常前不要删除归档；需要正式恢复时使用现有的 `restore-test` 和 `restore` 备份流程。
 
 ## 6. 玩家、白名单和 OP
 
@@ -490,7 +529,17 @@ git pull --ff-only
 
 优先选择 Modrinth 来源。CurseForge 或作者直链不是不能使用，但需要额外处理许可和下载兼容性。
 
-### 7.2 添加 Modrinth 模组
+### 7.2 查看 metadata slug
+
+先列出当前清单：
+
+```bash
+./mcctl mod list
+```
+
+表格列出 `SLUG`、`SIDE`、`SOURCE` 和显示名称。`SLUG` 就是 `pack/mods/<slug>.pw.toml` 的文件名，可直接用于后面的 `mod update`、`mod side` 和 `mod remove` 命令；不带参数执行 `./mcctl mod` 也会显示这张表。该命令只做本地读取和校验，不刷新或修改清单。
+
+### 7.3 添加 Modrinth 模组
 
 使用 slug：
 
@@ -506,7 +555,7 @@ git pull --ff-only
 
 命令在临时副本中调用 Packwiz；验证成功才会把候选清单复制回 `pack/`。此时只是本地候选，尚未部署到正式服务器或 Pages。
 
-### 7.3 添加 CurseForge 模组
+### 7.4 添加 CurseForge 模组
 
 ```bash
 ./mcctl mod add https://www.curseforge.com/minecraft/mc-mods/example-mod
@@ -521,7 +570,7 @@ git pull --ff-only
 
 自动添加成功不代表允许发布。继续之前必须完成[非 Modrinth 文件许可登记](#10-非-modrinth-文件许可登记)。
 
-### 7.4 添加作者 HTTPS 直链
+### 7.5 添加作者 HTTPS 直链
 
 只使用作者控制的永久 HTTPS 地址，优先官方 GitHub Release：
 
@@ -531,7 +580,7 @@ git pull --ff-only
 
 直链通常不能由 Packwiz 自动发现更新。不要使用临时签名 URL、网盘跳转页、需要 Cookie 的链接或来源不明的镜像。
 
-### 7.5 设置安装侧
+### 7.6 设置安装侧
 
 ```bash
 ./mcctl mod side metadata-slug client
@@ -549,7 +598,7 @@ git pull --ff-only
 
 不要仅凭“性能模组”三个字判断安装侧，应阅读该模组当前版本说明。安装侧变化也属于玩家更新：例如从 `client` 改成 `server` 时，更新页会要求已有玩家删除旧 JAR。
 
-### 7.6 检查更新
+### 7.7 检查更新
 
 只查看，不修改真实清单：
 
@@ -566,7 +615,7 @@ git pull --ff-only
 - 是否出现依赖新增、文件名变化或安装侧变化。
 - 是否出现 alpha、beta、snapshot。
 
-### 7.7 应用更新
+### 7.8 应用更新
 
 更新一个：
 
@@ -584,7 +633,7 @@ git pull --ff-only
 
 不要因为 `update all` 成功就直接发布；一次改变太多模组会增加定位问题和玩家手工更新的难度。
 
-### 7.8 删除模组
+### 7.9 删除模组
 
 先列出元数据：
 
@@ -615,7 +664,7 @@ mv runtime/removed-mods/<时间戳>/example.pw.toml pack/mods/
 
 删除内容模组前必须先在世界副本中检查。即使服务器能启动，原有方块被空气替换或物品丢失也可能是不可接受的损坏。
 
-### 7.9 刷新并验证候选清单
+### 7.10 刷新并验证候选清单
 
 ```bash
 ./mcctl mod check
@@ -1104,6 +1153,8 @@ CI 工作流在 Pull Request、非 `main` 分支推送和手动触发时运行�
 
 本机策略保留约 14 天，并限制最近约 20 份。具体在线文件名和格式由备份容器生成；脚本同时识别 `.tar.zst`、`.tgz` 和 `.tar.gz`。
 
+两者的用途不同：在线备份由 `backup-local` 在服务器运行时通过 RCON 协调保存，适合日常回退；停服快照是在服务器停止后直接打包 `runtime/data/`，适合开服前、测试服建立前和世界重置前使用。
+
 ### 14.2 手动备份
 
 ```bash
@@ -1120,7 +1171,21 @@ CI 工作流在 Pull Request、非 `main` 分支推送和手动触发时运行�
 ./mcctl backup-list
 ```
 
-恢复命令只接受这里显示的文件名，不接受任意路径。
+输出会显示 `local` 或 `offline` 类型。恢复和删除命令只接受这里显示的归档文件名，不接受任意路径。
+
+删除单个本机归档：
+
+```bash
+./mcctl backup delete <归档文件名> --confirm
+```
+
+快捷别名：
+
+```bash
+./mcctl backup-delete <归档文件名> --confirm
+```
+
+删除是永久操作，必须带 `--confirm`。如果 local 和 offline 中存在同名文件，使用 `local/<文件名>` 或 `offline/<文件名>` 指定来源；在线备份调度器正在运行时不能删除 local 归档。该命令不会影响远端 restic 备份。
 
 ### 14.4 解压测试
 
@@ -1639,7 +1704,15 @@ gh run view <运行编号> --log-failed
 | `./mcctl console` | 连接服务器控制台 |
 | `./mcctl rcon "命令"` | 执行 Minecraft 管理命令 |
 
-### 21.2 玩家权限
+### 21.2 世界
+
+| 命令 | 作用 |
+|---|---|
+| `./mcctl world status` | 查看世界路径、状态、种子配置和归档 |
+| `./mcctl world reset --seed <整数> --confirm` | 归档旧世界并配置指定种子 |
+| `./mcctl world reset --random --confirm` | 归档旧世界并配置随机种子 |
+
+### 21.3 玩家权限
 
 | 命令 | 作用 |
 |---|---|
@@ -1649,10 +1722,11 @@ gh run view <运行编号> --log-failed
 | `./mcctl rcon "op 玩家名"` | 授予 OP |
 | `./mcctl rcon "deop 玩家名"` | 撤销 OP |
 
-### 21.3 模组
+### 21.4 模组
 
 | 命令 | 作用 |
 |---|---|
+| `./mcctl mod list` | 列出 metadata slug、安装侧、来源和名称 |
 | `./mcctl mod add <slug或URL>` | 添加候选模组 |
 | `./mcctl mod remove <slug>` | 可恢复地移除元数据 |
 | `./mcctl mod side <slug> <client\|server\|both>` | 修正安装侧 |
@@ -1664,7 +1738,7 @@ gh run view <运行编号> --log-failed
 | `./mcctl mod publish full` | 发布要求玩家重新导入的完整更新 |
 | `./mcctl client build` | 在 `dist/` 构建并验证本地标准 `.mrpack` |
 
-### 21.4 测试服
+### 21.5 测试服
 
 | 命令 | 作用 |
 |---|---|
@@ -1673,12 +1747,14 @@ gh run view <运行编号> --log-failed
 | `./mcctl stage accept` | 接受当前健康测试服对应的清单哈希 |
 | `./mcctl stage stop` | 停止测试服和本地清单服务 |
 
-### 21.5 备份恢复
+### 21.6 备份恢复
 
 | 命令 | 作用 |
 |---|---|
 | `./mcctl backup` | 创建在线本机备份或停服快照 |
-| `./mcctl backup-list` | 列出可恢复备份 |
+| `./mcctl backup-list` | 列出可恢复备份及 `local`/`offline` 类型 |
+| `./mcctl backup delete <文件名> --confirm` | 删除一个本机备份 |
+| `./mcctl backup-delete <文件名> --confirm` | 删除备份的快捷别名 |
 | `./mcctl restore-test <文件名>` | 解压到隔离目录检查 |
 | `./mcctl restore <文件名> --confirm` | 停服状态下可恢复地替换正式数据 |
 

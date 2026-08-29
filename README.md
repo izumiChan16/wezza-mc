@@ -18,6 +18,7 @@
 - [第一次开服](#第一次开服)
 - [玩家加入方法](#玩家加入方法)
 - [日常开服和关服](#日常开服和关服)
+- [世界状态与重置](#世界状态与重置)
 - [玩家和管理员权限](#玩家和管理员权限)
 - [添加、更新和删除模组](#添加更新和删除模组)
 - [测试并发布模组变更](#测试并发布模组变更)
@@ -84,13 +85,14 @@ Windows 电脑                                  ▼
   内网穿透客户端 ──转发 127.0.0.1:25565──> Minecraft 容器
                                               │
 Arch WSL                                      ├── runtime/data：世界
-  ./mcctl ──管理 Docker Desktop───────────────└── runtime/backups：备份
+  ./mcctl ──管理 Docker Desktop───────────────├── runtime/backups：备份
+                                              └── runtime/world-archive：重置前归档
 ```
 
 需要记住的只有四点：
 
 1. `./mcctl` 是管理员的统一入口。
-2. `runtime/data` 是正式世界，不能随意删除。
+2. `runtime/data` 是正式世界；重置世界只能使用 `./mcctl world reset`。
 3. 改模组后必须先测试，再发布给服务器和玩家。
 4. `.mrpack` 代表一个确定版本；已有玩家不会在启动游戏时自动更新。
 
@@ -118,17 +120,13 @@ Arch WSL                                      ├── runtime/data：世界
 
 ### 当前模组
 
-| 模组 | 版本 | 安装位置 | 用途 |
-|---|---:|---|---|
-| Fabric API | 0.155.2 | 双方 | Fabric 模组基础依赖 |
-| Refined Storage | 3.2.1 | 双方 | 存储与自动化内容 |
-| Time in a Bottle | 7.0.1 | 双方 | 时间积累与方块加速 |
-| FerriteCore | 9.0.0 | 双方 | 降低内存占用 |
-| Lithium | 0.24.7 | 服务端 | 游戏逻辑性能优化 |
-| Krypton | 0.3.0 | 服务端 | 网络性能优化 |
-| ServerCore | 1.5.19 | 服务端 | 服务端性能优化 |
-| spark | 1.10.173 | 服务端 | 性能诊断 |
-| Sodium | 0.9.1 | 客户端 | 渲染性能优化 |
+当前模组清单以 `pack/` 为准；名称、metadata slug、来源和安装位置可随时查看：
+
+```bash
+./mcctl mod list
+```
+
+这样不会因为单个模组更新而让这份总说明过期。玩家只需关注服务器页面的当前 `.mrpack` 和更新说明。
 
 ## 修改本机配置
 
@@ -144,6 +142,8 @@ nano .env
 | `PACKWIZ_URL` | 已配置 | 正式模组清单地址，不要随意修改 |
 | `MC_PORT` | `25565` | 正式服只在本机回环地址监听的端口 |
 | `STAGING_PORT` | `25566` | 隔离测试服端口 |
+| `WORLD_NAME` | `world` | 正式世界目录名，只允许单层安全目录名 |
+| `WORLD_SEED` | 空 | 新世界生成时使用的有符号 64 位种子；空值为随机 |
 | `MEMORY` | `5G` | 正式服 Java 最大内存 |
 | `STAGING_MEMORY` | `5G` | 测试服 Java 最大内存 |
 | `TZ` | `Asia/Taipei` | 日志和备份时间所用时区 |
@@ -378,7 +378,31 @@ cd /home/izumi/wezza_mc
 ./mcctl console
 ```
 
-使用 `Ctrl+P`、`Ctrl+Q` 依次按下以分离控制台。不要按 `Ctrl+C` 强制终止服务器。
+命令会先显示连接成功和操作说明。控制台没有命令提示符，直接输入 Minecraft 命令并按 Enter，命令不要带 `/`。使用 `Ctrl+P`、`Ctrl+Q` 依次按下以分离控制台；不要按 `Ctrl+C` 强制终止服务器。
+
+## 世界状态与重置
+
+查看正式世界是否存在、所在目录、大小、最近修改时间、当前生成配置和旧世界归档：
+
+```bash
+./mcctl world status
+```
+
+重置前必须确保正式服、备份服务和 staging 都已停止。脚本会先创建完整停服快照，再把旧世界移到 `runtime/world-archive/`，最后更新新世界种子；任何步骤失败都会尽量保留旧世界。脚本不会自动启动新世界。
+
+使用指定的有符号 64 位整数种子：
+
+```bash
+./mcctl world reset --seed 123456789 --confirm
+```
+
+使用随机种子：
+
+```bash
+./mcctl world reset --random --confirm
+```
+
+`--confirm` 是必需的，不能省略。重置完成后先检查 `./mcctl world status`，确认无误再执行 `./mcctl start`。归档在确认新世界正常前不要删除；正式恢复仍使用现有备份恢复流程。
 
 ## 添加、更新和删除模组
 
@@ -394,6 +418,12 @@ cd /home/izumi/wezza_mc
 - 如果不来自 Modrinth，确认作者允许对应的下载或再分发方式。
 
 模组操作先改本地清单，不会立即影响正在运行的正式服或 GitHub Pages。
+
+先查看当前清单（包括可用于 `mod update`、`mod side` 和 `mod remove` 的 metadata slug）：
+
+```bash
+./mcctl mod list
+```
 
 ### 从 Modrinth 添加
 
@@ -690,6 +720,13 @@ git@github.com:izumiChan16/wezza-mc.git
 
 本机备份默认保留 14 天，并限制为最近 20 份。
 
+两类本机备份用途不同：
+
+| 类型 | 位置 | 特点 |
+|---|---|---|
+| `local` 在线备份 | `runtime/backups/local/` | 正式服运行时由 `backup-local` 通过 RCON 协调保存，默认每两小时一次 |
+| `offline` 停服快照 | `runtime/backups/offline/` | 服务器停止后直接打包 `runtime/data/`，用于开服前、测试前和世界重置前的安全点 |
+
 ### 手动备份
 
 ```bash
@@ -704,7 +741,19 @@ git@github.com:izumiChan16/wezza-mc.git
 ./mcctl backup-list
 ```
 
-记下输出中的完整文件名。
+输出中的类型可以区分 `local` 和 `offline`；记下完整文件名。删除备份必须明确确认：
+
+```bash
+./mcctl backup delete <文件名> --confirm
+```
+
+也可以使用等价的快捷命令：
+
+```bash
+./mcctl backup-delete <文件名> --confirm
+```
+
+删除是永久操作，只接受 `backup-list` 中的归档文件名。若两个目录存在同名文件，命令会拒绝猜测，此时使用 `local/<文件名>` 或 `offline/<文件名>`。在线备份调度器正在写入时，必须先停止它；远端 restic 备份不会被此命令删除。
 
 ### 测试备份是否能解压
 
@@ -1050,6 +1099,14 @@ Packwiz 校验失败时不要手动修改 `index.toml` 哈希，应让 `./mcctl 
 | `./mcctl console` | 连接服务器控制台 |
 | `./mcctl rcon "命令"` | 执行 Minecraft 管理命令 |
 
+### 世界
+
+| 命令 | 作用 |
+|---|---|
+| `./mcctl world status` | 查看世界路径、状态、种子配置和归档 |
+| `./mcctl world reset --seed <整数> --confirm` | 归档旧世界并配置指定种子 |
+| `./mcctl world reset --random --confirm` | 归档旧世界并配置随机种子 |
+
 ### 玩家
 
 | 命令 | 作用 |
@@ -1062,6 +1119,7 @@ Packwiz 校验失败时不要手动修改 `index.toml` 哈希，应让 `./mcctl 
 
 | 命令 | 作用 |
 |---|---|
+| `./mcctl mod list` | 列出 metadata slug、安装侧、来源和名称 |
 | `./mcctl mod add <slug或URL>` | 添加本地候选模组 |
 | `./mcctl mod update-check` | 在临时副本中检查更新 |
 | `./mcctl mod update <名称>` | 更新一个候选模组 |
@@ -1086,7 +1144,9 @@ Packwiz 校验失败时不要手动修改 `index.toml` 哈希，应让 `./mcctl 
 | 命令 | 作用 |
 |---|---|
 | `./mcctl backup` | 创建一次本机备份 |
-| `./mcctl backup-list` | 列出备份 |
+| `./mcctl backup-list` | 列出备份（显示 `local`/`offline` 类型） |
+| `./mcctl backup delete <文件名> --confirm` | 删除一个本机备份 |
+| `./mcctl backup-delete <文件名> --confirm` | 删除备份的快捷别名 |
 | `./mcctl restore-test <文件名>` | 安全解压检查备份 |
 | `./mcctl restore <文件名> --confirm` | 停服状态下正式恢复 |
 

@@ -5,7 +5,8 @@
 - `mcctl` is the Bash entry point for server, backup, staging, mod, and client-pack operations.
 - `compose.yaml` defines production, staging, backup, and Packwiz containers.
 - `pack/` is the authoritative Packwiz manifest. Mod metadata lives in `pack/mods/*.pw.toml`; redistribution approvals live in `pack/redistribution.toml`.
-- `tools/` contains Python validation/release tooling and the pinned Packwiz image.
+- `tools/` contains Python validation, release, and world-state tooling plus the pinned Packwiz image.
+- `tests/` contains isolated standard-library tests; never point them at `runtime/`.
 - `site/` contains GitHub Pages and release metadata; `docs/` contains administrator documentation.
 - `.github/workflows/` validates and deploys. Generated or private state belongs in ignored `dist/`, `runtime/`, `.env`, and `secrets/` paths.
 
@@ -13,6 +14,7 @@
 
 - `bash -n mcctl` — check shell syntax.
 - `python3 -m py_compile tools/*.py` — check Python syntax.
+- `python3 -m unittest discover -s tests -v` — run isolated world-state tests.
 - `./mcctl mod check` — refresh and validate the Packwiz manifest; review any resulting `pack/` diff.
 - `python3 tools/release_pack.py safety --pack-dir pack` — enforce non-Modrinth redistribution approvals.
 - `python3 tools/release_pack.py release-check --pack-dir pack --release site/release.json` — verify release metadata.
@@ -27,7 +29,7 @@ Use two-space indentation in Bash/YAML, four spaces in Python, and existing HTML
 
 ## Testing Guidelines
 
-There is no unit-test framework or coverage threshold. Match CI with the syntax, Packwiz, release, and Compose checks above. Check site changes at mobile and desktop widths. Mod changes also require staging and client import testing; see `docs/ADMIN_GUIDE.md`.
+Tests use Python's standard-library `unittest`; there is no coverage threshold. Match CI with the syntax, unit, Packwiz, release, and Compose checks above. Check site changes at mobile and desktop widths. Mod changes also require staging and client import testing; see `docs/ADMIN_GUIDE.md`.
 
 ## Commit & Pull Request Guidelines
 

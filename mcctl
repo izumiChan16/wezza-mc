@@ -31,7 +31,14 @@ Server:
   rcon <command...>            Send a Minecraft command through internal RCON
   whitelist add|remove|list    Manage the Minecraft whitelist
 
+World:
+  world status                 Show world state, path, seed setting, and archives
+  world reset --seed <int>     Archive the world and configure a specific seed
+  world reset --random         Archive the world and configure random generation
+                               Both reset forms require --confirm and a stopped server
+
 Mods and clients:
+  mod list                     List metadata slugs, sides, sources, and names
   mod add <URL-or-slug>        Add from Modrinth, CurseForge, or an HTTPS URL
   mod remove <name>            Remove Packwiz metadata
   mod side <name> <side>       Set client, server, or both explicitly
@@ -50,7 +57,9 @@ Staging:
 
 Backups:
   backup                       Create an online or offline local backup
+  backup delete <archive>      Delete one local archive (requires --confirm)
   backup-list                  List local archives
+  backup-delete <archive>      Alias for 'backup delete' (requires --confirm)
   restore-test <archive>       Extract an archive into runtime/restore-test
   restore <archive> --confirm  Recoverably replace production data while stopped
 EOF
@@ -76,11 +85,25 @@ docker_ready() {
 ensure_initialized() {
   [[ -f "${ROOT_DIR}/.env" ]] || die "Missing .env. Run './mcctl init', edit .env, then retry."
   [[ -s "${ROOT_DIR}/secrets/rcon_password.txt" ]] || die "Missing RCON secret. Run './mcctl init'."
+  validate_world_config || die "Invalid world configuration in .env."
   mkdir -p "$DATA_DIR" "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR" "$STAGING_DIR"
 }
 
 service_running() {
-  compose ps --status running --services 2>/dev/null | grep -Fxq "$1"
+  local service="$1"
+  local -a profile_args=()
+  case "$service" in
+    pack-server|minecraft-staging) profile_args=(--profile staging) ;;
+  esac
+  compose "${profile_args[@]}" ps --status running --services 2>/dev/null | grep -Fxq "$service"
+}
+
+validate_world_config() {
+  python3 "${ROOT_DIR}/tools/world_control.py" validate --root "$ROOT_DIR"
+}
+
+validate_world_seed() {
+  python3 "${ROOT_DIR}/tools/world_control.py" validate-seed --seed "$1"
 }
 
 pack_sha256() {
@@ -152,19 +175,25 @@ prune_offline_backups() {
 }
 
 offline_snapshot() {
+  OFFLINE_SNAPSHOT_PATH=""
   mkdir -p "$DATA_DIR" "$OFFLINE_BACKUP_DIR"
   if [[ -z "$(find "$DATA_DIR" -mindepth 1 -print -quit)" ]]; then
     info "No existing server data; skipping the offline snapshot"
     return 0
   fi
-  local stamp archive
+  local stamp archive suffix=0
   stamp="$(date '+%Y%m%d-%H%M%S')"
   archive="${OFFLINE_BACKUP_DIR}/wezza-session-start-${stamp}.tar.zst"
+  while [[ -e "$archive" ]]; do
+    suffix=$((suffix + 1))
+    archive="${OFFLINE_BACKUP_DIR}/wezza-session-start-${stamp}-${suffix}.tar.zst"
+  done
   info "Creating stopped-state snapshot: ${archive#"${ROOT_DIR}"/}"
   tar --zstd -cf "$archive" \
     --exclude='./logs' --exclude='./cache' --exclude='./*.tmp' \
     -C "$DATA_DIR" .
   prune_offline_backups
+  OFFLINE_SNAPSHOT_PATH="$archive"
 }
 
 latest_backup() {
@@ -175,15 +204,34 @@ latest_backup() {
 
 resolve_backup() {
   local requested="$1"
-  [[ "$requested" != */* ]] || die "Backup ID must be a filename shown by backup-list."
-  local candidate
-  for candidate in "$LOCAL_BACKUP_DIR/$requested" "$OFFLINE_BACKUP_DIR/$requested"; do
-    if [[ -f "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  die "Backup not found: $requested"
+  local requested_name="$requested" requested_scope="" candidate
+  case "$requested" in
+    local/*)
+      requested_scope=local
+      requested_name="${requested#local/}"
+      ;;
+    offline/*)
+      requested_scope=offline
+      requested_name="${requested#offline/}"
+      ;;
+  esac
+  [[ -n "$requested_name" && "$requested_name" != */* ]] \
+    || die "Backup ID must be a filename shown by backup-list."
+
+  local -a candidates=()
+  if [[ -z "$requested_scope" || "$requested_scope" == local ]]; then
+    candidate="$LOCAL_BACKUP_DIR/$requested_name"
+    [[ -f "$candidate" ]] && candidates+=("$candidate")
+  fi
+  if [[ -z "$requested_scope" || "$requested_scope" == offline ]]; then
+    candidate="$OFFLINE_BACKUP_DIR/$requested_name"
+    [[ -f "$candidate" ]] && candidates+=("$candidate")
+  fi
+  case "${#candidates[@]}" in
+    0) die "Backup not found: $requested" ;;
+    1) printf '%s\n' "${candidates[0]}" ;;
+    *) die "Backup name exists in local and offline; use local/$requested_name or offline/$requested_name." ;;
+  esac
 }
 
 run_local_backup() {
@@ -292,10 +340,96 @@ command_status() {
     "${MC_PORT:-25565}" "${STAGING_PORT:-25566}"
 }
 
+command_world() {
+  local action="${1:-status}"
+  shift || true
+  load_settings
+  case "$action" in
+    status)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl world status"
+      if docker info >/dev/null 2>&1; then
+        if service_running minecraft; then
+          printf 'Production service: running\n'
+        else
+          printf 'Production service: stopped\n'
+        fi
+        if service_running minecraft-staging; then
+          printf 'Staging service: running\n'
+        else
+          printf 'Staging service: stopped\n'
+        fi
+      else
+        printf 'Production service: unknown (Docker unavailable)\n'
+        printf 'Staging service: unknown (Docker unavailable)\n'
+      fi
+      python3 "${ROOT_DIR}/tools/world_control.py" status --root "$ROOT_DIR"
+      ;;
+    reset)
+      local reset_mode="" seed_value="" confirmed=false
+      while (( $# > 0 )); do
+        case "$1" in
+          --seed)
+            [[ $# -ge 2 ]] || die "Usage: ./mcctl world reset --seed <integer> --confirm"
+            [[ -z "$reset_mode" ]] || die "Choose exactly one of --seed or --random."
+            reset_mode=seed
+            seed_value="$2"
+            shift 2
+            ;;
+          --random)
+            [[ -z "$reset_mode" ]] || die "Choose exactly one of --seed or --random."
+            reset_mode=random
+            shift
+            ;;
+          --confirm)
+            confirmed=true
+            shift
+            ;;
+          *) die "Usage: ./mcctl world reset --seed <integer> --confirm" ;;
+        esac
+      done
+      [[ -n "$reset_mode" && "$confirmed" == true ]] \
+        || die "World reset requires exactly one seed mode and --confirm."
+      if [[ "$reset_mode" == seed ]]; then
+        validate_world_seed "$seed_value" || die "Invalid world seed."
+      fi
+
+      ensure_initialized
+      docker_ready
+      local service
+      for service in minecraft backup-local minecraft-staging pack-server; do
+        if service_running "$service"; then
+          die "Stop the ${service} service before resetting the world."
+        fi
+      done
+
+      info "Creating a full offline backup before resetting the world"
+      offline_snapshot
+      if [[ -n "$OFFLINE_SNAPSHOT_PATH" ]]; then
+        info "Offline backup ready: ${OFFLINE_SNAPSHOT_PATH#"${ROOT_DIR}"/}"
+      else
+        info "No existing server data; there was no world to back up"
+      fi
+
+      local -a reset_args=(reset --root "$ROOT_DIR" --confirm)
+      if [[ "$reset_mode" == seed ]]; then
+        reset_args+=(--seed "$seed_value")
+      else
+        reset_args+=(--random)
+      fi
+      python3 "${ROOT_DIR}/tools/world_control.py" "${reset_args[@]}"
+      ;;
+    *) die "Usage: ./mcctl world status|reset --seed <integer>|--random --confirm" ;;
+  esac
+}
+
 command_mod() {
-  local action="${1:-}"
+  local action="${1:-list}"
   shift || true
   case "$action" in
+    list)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl mod list"
+      python3 "${ROOT_DIR}/tools/validate_pack.py" "${ROOT_DIR}/pack"
+      ;;
     add)
       [[ $# -ge 1 ]] || die "Usage: ./mcctl mod add <URL-or-slug>"
       local source="$1" candidate_dir
@@ -553,9 +687,50 @@ command_stage() {
 
 command_backup_list() {
   mkdir -p "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR"
-  find "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
-    \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
-    -printf '%TY-%Tm-%Td %TH:%TM  %10s  %f\n' | sort -r
+  {
+    find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type f \
+      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+      -printf '%TY-%Tm-%Td %TH:%TM  local    %10s  %f\n'
+    find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
+      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+      -printf '%TY-%Tm-%Td %TH:%TM  offline  %10s  %f\n'
+  } | sort -r
+}
+
+command_backup_delete() {
+  [[ $# -eq 2 && "$2" == "--confirm" ]] \
+    || die "Usage: ./mcctl backup delete <archive> --confirm"
+  local archive requested="$1"
+  archive="$(resolve_backup "$requested")"
+  [[ ! -L "$archive" ]] || die "Backup ID must refer to a real archive, not a symlink."
+  if [[ "$archive" == "$LOCAL_BACKUP_DIR/"* ]] \
+    && docker info >/dev/null 2>&1 \
+    && service_running backup-local; then
+    die "The local backup scheduler is running; stop it before deleting an online archive."
+  fi
+  info "Deleting backup archive: ${archive#"${ROOT_DIR}"/}"
+  rm -f -- "$archive"
+  [[ ! -e "$archive" ]] || die "Could not delete backup archive: $requested"
+  info "Backup deleted. Remote restic backups, if enabled, were not changed."
+}
+
+command_backup() {
+  local action="${1:-create}"
+  case "$action" in
+    create)
+      [[ $# -eq 0 || ( $# -eq 1 && "$1" == create ) ]] \
+        || die "Usage: ./mcctl backup"
+      load_settings
+      ensure_initialized
+      docker_ready
+      if service_running minecraft; then run_local_backup; else offline_snapshot; fi
+      ;;
+    delete)
+      shift
+      command_backup_delete "$@"
+      ;;
+    *) die "Usage: ./mcctl backup [delete <archive> --confirm]" ;;
+  esac
 }
 
 command_restore_test() {
@@ -636,10 +811,25 @@ main() {
     logs) load_settings; docker_ready; compose logs -f minecraft ;;
     console)
       load_settings; docker_ready
-      local container_id
-      container_id="$(compose ps -q minecraft)"
-      [[ -n "$container_id" ]] || die "The production server is not running."
-      docker attach "$container_id"
+      [[ -t 0 && -t 1 ]] || die "The Minecraft console requires an interactive WSL terminal."
+      service_running minecraft || die "The production server is not running."
+      local container_id attach_status
+      container_id="$(compose ps --status running -q minecraft)"
+      [[ -n "$container_id" ]] || die "The production server container could not be located."
+      printf '\nConnected to the production Minecraft console.\n'
+      printf 'The console has no prompt; type a command and press Enter. Do not include the leading /.\n'
+      printf 'Detach with Ctrl-P, then Ctrl-Q. Ctrl+C is not sent to the Minecraft process.\n\n'
+      if docker attach --sig-proxy=false "$container_id"; then
+        attach_status=0
+      else
+        attach_status=$?
+      fi
+      if service_running minecraft; then
+        info "Console detached; the production server is still running."
+      else
+        warn "Console ended because the production server is no longer running."
+      fi
+      return "$attach_status"
       ;;
     rcon)
       [[ $# -ge 1 ]] || die "Usage: ./mcctl rcon <command...>"
@@ -654,12 +844,11 @@ main() {
       esac
       ;;
     mod) command_mod "$@" ;;
+    world) command_world "$@" ;;
     stage) command_stage "$@" ;;
-    backup)
-      load_settings; ensure_initialized; docker_ready
-      if service_running minecraft; then run_local_backup; else offline_snapshot; fi
-      ;;
+    backup) command_backup "$@" ;;
     backup-list) command_backup_list ;;
+    backup-delete) command_backup_delete "$@" ;;
     restore-test) command_restore_test "$@" ;;
     restore) command_restore "$@" ;;
     client) command_client "$@" ;;

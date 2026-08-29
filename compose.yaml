@@ -8,6 +8,8 @@ x-server-environment: &server-environment
   MEMORY: "${MEMORY:-5G}"
   TZ: "${TZ:-Asia/Taipei}"
   MOTD: "${MOTD:-Wezza Fabric 26.1.2}"
+  LEVEL: "${WORLD_NAME:-world}"
+  SEED: "${WORLD_SEED:-}"
   MODE: survival
   DIFFICULTY: hard
   ONLINE_MODE: "TRUE"
