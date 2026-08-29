@@ -149,3 +149,7 @@ metafile = true
 file = "mods/xaeros-world-map.pw.toml"
 hash = "d7c89cada316cc9b4f8ca63c16f8c6227a7df91acd69e2d623d25b5c7954ecfe"
 metafile = true
+
+[[files]]
+file = "servers.dat"
+hash = "91df1781bfd974783b1fb9e80385d6a0d5bfa372bace7d8b07aef4c0de070e8d"
