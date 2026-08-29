@@ -1,0 +1,153 @@
+name: wezza-mc
+
+x-server-environment: &server-environment
+  EULA: "${EULA:-FALSE}"
+  TYPE: FABRIC
+  VERSION: "26.1.2"
+  FABRIC_LOADER_VERSION: "0.19.3"
+  MEMORY: "${MEMORY:-5G}"
+  TZ: "${TZ:-Asia/Taipei}"
+  MOTD: "${MOTD:-Wezza Fabric 26.1.2}"
+  MODE: survival
+  DIFFICULTY: hard
+  ONLINE_MODE: "TRUE"
+  ENFORCE_SECURE_PROFILE: "TRUE"
+  ENABLE_WHITELIST: "TRUE"
+  ENFORCE_WHITELIST: "TRUE"
+  PVP: "TRUE"
+  MAX_PLAYERS: "${MAX_PLAYERS:-10}"
+  VIEW_DISTANCE: "10"
+  SIMULATION_DISTANCE: "8"
+  ENABLE_COMMAND_BLOCK: "FALSE"
+  ENABLE_RCON: "TRUE"
+  RCON_PASSWORD_FILE: /run/secrets/rcon_password
+  BROADCAST_RCON_TO_OPS: "FALSE"
+  ENABLE_AUTOPAUSE: "FALSE"
+  ENABLE_AUTOSTOP: "FALSE"
+
+services:
+  minecraft:
+    image: itzg/minecraft-server:2026.8.2-java25@sha256:efa878ddb49cf5251b2e5f2ad71b08fd2f7236c1f7907433f6697258b31d2ce4
+    restart: "no"
+    tty: true
+    stdin_open: true
+    stop_grace_period: 2m
+    ports:
+      - "127.0.0.1:${MC_PORT:-25565}:25565"
+    environment:
+      <<: *server-environment
+      PACKWIZ_URL: "${PACKWIZ_URL:-https://example.invalid/wezza-mc/pack.toml}"
+    volumes:
+      - ./runtime/data:/data
+    secrets:
+      - rcon_password
+
+  backup-local:
+    image: itzg/mc-backup@sha256:cef928637262946c4988d7128eb3e17dcabc399e22b9c1e9d0297de86949a1cf
+    restart: "no"
+    depends_on:
+      minecraft:
+        condition: service_healthy
+    environment:
+      TZ: "${TZ:-Asia/Taipei}"
+      RCON_HOST: minecraft
+      RCON_PASSWORD_FILE: /run/secrets/rcon_password
+      BACKUP_NAME: wezza-mc
+      BACKUP_INTERVAL: 2h
+      INITIAL_DELAY: 2h
+      BACKUP_ON_STARTUP: "FALSE"
+      PAUSE_IF_NO_PLAYERS: "FALSE"
+      PRUNE_BACKUPS_DAYS: "14"
+      PRUNE_BACKUPS_COUNT: "20"
+      TAR_COMPRESS_METHOD: zstd
+      LINK_LATEST: "TRUE"
+      EXCLUDES: "*.jar,cache,logs,*.tmp"
+    volumes:
+      - ./runtime/data:/data:ro
+      - ./runtime/backups/local:/backups
+    secrets:
+      - rcon_password
+
+  backup-remote:
+    image: itzg/mc-backup@sha256:cef928637262946c4988d7128eb3e17dcabc399e22b9c1e9d0297de86949a1cf
+    profiles: ["remote"]
+    restart: "no"
+    hostname: "${RESTIC_HOSTNAME:-wezza-home-pc}"
+    environment:
+      TZ: "${TZ:-Asia/Taipei}"
+      RCON_HOST: minecraft
+      RCON_PASSWORD_FILE: /run/secrets/rcon_password
+      BACKUP_METHOD: restic
+      BACKUP_NAME: wezza-mc
+      RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+      RESTIC_REPOSITORY: "${RESTIC_REPOSITORY:-}"
+      RESTIC_HOSTNAME: "${RESTIC_HOSTNAME:-wezza-home-pc}"
+      RESTIC_ADDITIONAL_TAGS: "mc_backups session_end"
+      PRUNE_RESTIC_RETENTION: "--keep-daily 14 --keep-weekly 8 --keep-monthly 12"
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/aws_credentials
+      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-auto}"
+    volumes:
+      - ./runtime/data:/data:ro
+    secrets:
+      - rcon_password
+      - restic_password
+      - aws_credentials
+
+  packwiz:
+    build:
+      context: ./tools/packwiz
+    profiles: ["tools"]
+    user: "${PUID:-1000}:${PGID:-1000}"
+    working_dir: /workspace/pack
+    environment:
+      HOME: /tmp/packwiz
+      XDG_CACHE_HOME: /tmp/packwiz/cache
+      XDG_CONFIG_HOME: /tmp/packwiz/config
+    volumes:
+      - "${PACK_DIR:-./pack}:/workspace/pack"
+
+  pack-server:
+    build:
+      context: ./tools/packwiz
+    profiles: ["staging"]
+    restart: "no"
+    user: "${PUID:-1000}:${PGID:-1000}"
+    working_dir: /workspace/pack
+    environment:
+      HOME: /tmp/packwiz
+      XDG_CACHE_HOME: /tmp/packwiz/cache
+      XDG_CONFIG_HOME: /tmp/packwiz/config
+    command: ["serve", "--refresh", "--port", "8080"]
+    expose:
+      - "8080"
+    volumes:
+      - ./pack:/workspace/pack
+
+  minecraft-staging:
+    image: itzg/minecraft-server:2026.8.2-java25@sha256:efa878ddb49cf5251b2e5f2ad71b08fd2f7236c1f7907433f6697258b31d2ce4
+    profiles: ["staging"]
+    restart: "no"
+    tty: true
+    stdin_open: true
+    stop_grace_period: 2m
+    depends_on:
+      - pack-server
+    ports:
+      - "127.0.0.1:${STAGING_PORT:-25566}:25565"
+    environment:
+      <<: *server-environment
+      MEMORY: "${STAGING_MEMORY:-5G}"
+      MOTD: "[STAGING] ${MOTD:-Wezza Fabric 26.1.2}"
+      PACKWIZ_URL: http://pack-server:8080/pack.toml
+    volumes:
+      - ./runtime/staging/data:/data
+    secrets:
+      - rcon_password
+
+secrets:
+  rcon_password:
+    file: ./secrets/rcon_password.txt
+  restic_password:
+    file: ./secrets/restic_password.txt
+  aws_credentials:
+    file: ./secrets/aws_credentials

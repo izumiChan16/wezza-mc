@@ -1,0 +1,45 @@
+name: Validate server repository
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Install pinned Packwiz
+        run: go install github.com/packwiz/packwiz@dfd8b68a4796c763e25bad50265ea1f1233e24f1
+
+      - name: Refresh and validate Packwiz
+        run: |
+          cd pack
+          "$(go env GOPATH)/bin/packwiz" refresh
+          cd ..
+          python3 tools/validate_pack.py pack
+          git diff --exit-code -- pack
+
+      - name: Validate scripts and Compose
+        run: |
+          bash -n mcctl
+          python3 -m py_compile tools/validate_pack.py tools/build_client.py
+          cp .env.example .env
+          cp secrets/aws_credentials.example secrets/aws_credentials
+          printf 'ci-only\n' > secrets/rcon_password.txt
+          printf 'ci-only\n' > secrets/restic_password.txt
+          docker compose config --quiet
+
+      - name: Build a Prism package
+        run: >-
+          python3 tools/build_client.py
+          --pack-url https://example.github.io/wezza-mc/pack.toml
+          --output dist/wezza-mc-prism.zip

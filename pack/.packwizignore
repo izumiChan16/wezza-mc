@@ -1,0 +1,6 @@
+# Repository and generated artifacts
+.git/
+.github/
+*.mrpack
+*.zip
+README*

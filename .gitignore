@@ -1,0 +1,11 @@
+.env
+.repo-git/
+secrets/rcon_password.txt
+secrets/restic_password.txt
+secrets/aws_credentials
+runtime/
+dist/
+*.mrpack
+*.log
+__pycache__/
+*.pyc

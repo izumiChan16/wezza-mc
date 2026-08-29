@@ -1,0 +1,593 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="${ROOT_DIR}/compose.yaml"
+DATA_DIR="${ROOT_DIR}/runtime/data"
+LOCAL_BACKUP_DIR="${ROOT_DIR}/runtime/backups/local"
+OFFLINE_BACKUP_DIR="${ROOT_DIR}/runtime/backups/offline"
+STAGING_DIR="${ROOT_DIR}/runtime/staging"
+ACCEPTED_FILE="${STAGING_DIR}/ACCEPTED_PACK_SHA256"
+
+cd "$ROOT_DIR"
+
+info() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: ./mcctl <command>
+
+Server:
+  init                         Create .env, secrets, and runtime directories
+  start                        Create a pre-session snapshot and start the server
+  stop [--skip-remote]         Save, back up, and stop safely
+  restart                      Safe stop followed by start
+  status                       Show containers and local addresses
+  logs                         Follow production server logs
+  console                      Attach to the server console (Ctrl-P Ctrl-Q to detach)
+  rcon <command...>            Send a Minecraft command through internal RCON
+  whitelist add|remove|list    Manage the Minecraft whitelist
+
+Mods and clients:
+  mod add <URL-or-slug>        Add from Modrinth, CurseForge, or an HTTPS URL
+  mod remove <name>            Remove Packwiz metadata
+  mod side <name> <side>       Set client, server, or both explicitly
+  mod update <name|all>        Apply a candidate update locally
+  mod update-check             Check updates in a disposable copy
+  mod check                    Refresh and validate the candidate pack
+  mod publish [--force]        Commit and push an accepted pack to GitHub Pages
+  client build [PACK_URL]      Build the self-updating Prism import ZIP
+  client mrpack --confirm      Export a manual snapshot after license review
+
+Staging:
+  stage start                  Start an isolated server on 127.0.0.1:25566
+  stage stop                   Stop the isolated server
+  stage logs                   Follow staging logs
+  stage accept                 Mark the currently tested pack as accepted
+
+Backups:
+  backup                       Create an online or offline local backup
+  backup-list                  List local archives
+  restore-test <archive>       Extract an archive into runtime/restore-test
+  restore <archive> --confirm  Recoverably replace production data while stopped
+EOF
+}
+
+load_settings() {
+  if [[ -f "${ROOT_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${ROOT_DIR}/.env"
+    set +a
+  fi
+}
+
+compose() {
+  docker compose --project-directory "$ROOT_DIR" -f "$COMPOSE_FILE" "$@"
+}
+
+docker_ready() {
+  docker info >/dev/null 2>&1 || die "Docker Desktop is not reachable from this WSL distribution."
+}
+
+ensure_initialized() {
+  [[ -f "${ROOT_DIR}/.env" ]] || die "Missing .env. Run './mcctl init', edit .env, then retry."
+  [[ -s "${ROOT_DIR}/secrets/rcon_password.txt" ]] || die "Missing RCON secret. Run './mcctl init'."
+  mkdir -p "$DATA_DIR" "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR" "$STAGING_DIR"
+}
+
+service_running() {
+  compose ps --status running --services 2>/dev/null | grep -Fxq "$1"
+}
+
+pack_sha256() {
+  find "${ROOT_DIR}/pack" -type f -print0 \
+    | sort -z \
+    | xargs -0 sha256sum \
+    | sha256sum \
+    | awk '{print $1}'
+}
+
+packwiz_run() {
+  docker_ready
+  compose --profile tools run --rm --no-deps packwiz "$@"
+}
+
+packwiz_run_in() {
+  local source_dir="$1"
+  shift
+  docker_ready
+  PACK_DIR="$source_dir" compose --profile tools run --rm --no-deps packwiz "$@"
+}
+
+candidate_pack_dir() {
+  local candidate_dir
+  candidate_dir="$(mktemp -d /tmp/wezza-pack-candidate.XXXXXX)"
+  cp -a "${ROOT_DIR}/pack/." "$candidate_dir/"
+  printf '%s\n' "$candidate_dir"
+}
+
+validate_candidate_pack() {
+  local candidate_dir="$1"
+  packwiz_run_in "$candidate_dir" refresh
+  python3 "${ROOT_DIR}/tools/validate_pack.py" "$candidate_dir"
+}
+
+promote_candidate_pack() {
+  local candidate_dir="$1"
+  cp -a "$candidate_dir/." "${ROOT_DIR}/pack/"
+}
+
+refresh_and_validate_pack() {
+  info "Refreshing Packwiz index"
+  packwiz_run refresh
+  python3 "${ROOT_DIR}/tools/validate_pack.py" "${ROOT_DIR}/pack"
+}
+
+prune_offline_backups() {
+  find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.zst' -mtime +14 -delete
+  local position=0
+  while IFS= read -r archive; do
+    position=$((position + 1))
+    if (( position > 20 )); then
+      rm -f -- "$archive"
+    fi
+  done < <(find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.zst' -printf '%T@ %p\n' \
+    | sort -rn | cut -d' ' -f2-)
+}
+
+offline_snapshot() {
+  mkdir -p "$DATA_DIR" "$OFFLINE_BACKUP_DIR"
+  if [[ -z "$(find "$DATA_DIR" -mindepth 1 -print -quit)" ]]; then
+    info "No existing server data; skipping the offline snapshot"
+    return 0
+  fi
+  local stamp archive
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  archive="${OFFLINE_BACKUP_DIR}/wezza-session-start-${stamp}.tar.zst"
+  info "Creating stopped-state snapshot: ${archive#"${ROOT_DIR}"/}"
+  tar --zstd -cf "$archive" \
+    --exclude='./logs' --exclude='./cache' --exclude='./*.tmp' \
+    -C "$DATA_DIR" .
+  prune_offline_backups
+}
+
+latest_backup() {
+  find "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
+    \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+    -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-
+}
+
+resolve_backup() {
+  local requested="$1"
+  [[ "$requested" != */* ]] || die "Backup ID must be a filename shown by backup-list."
+  local candidate
+  for candidate in "$LOCAL_BACKUP_DIR/$requested" "$OFFLINE_BACKUP_DIR/$requested"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  die "Backup not found: $requested"
+}
+
+run_local_backup() {
+  service_running minecraft || die "The production server is not running."
+  if ! service_running backup-local; then
+    compose up -d backup-local
+  fi
+  info "Creating an RCON-coordinated local backup"
+  compose exec -T backup-local backup now
+}
+
+remote_backup_enabled() {
+  [[ "${ENABLE_REMOTE_BACKUP:-false}" == "true" ]]
+}
+
+run_remote_backup() {
+  [[ -n "${RESTIC_REPOSITORY:-}" ]] || die "ENABLE_REMOTE_BACKUP=true but RESTIC_REPOSITORY is empty."
+  [[ -s "${ROOT_DIR}/secrets/restic_password.txt" ]] || die "Missing restic password secret."
+  [[ -s "${ROOT_DIR}/secrets/aws_credentials" ]] || die "Missing S3 credentials secret."
+  info "Creating the encrypted restic/S3 backup"
+  compose --profile remote run --rm --no-deps backup-remote backup now
+}
+
+command_init() {
+  if [[ ! -f "${ROOT_DIR}/.env" ]]; then
+    cp "${ROOT_DIR}/.env.example" "${ROOT_DIR}/.env"
+    info "Created .env; set EULA=TRUE and replace the GitHub Pages URL before starting"
+  else
+    info ".env already exists; leaving it unchanged"
+  fi
+
+  mkdir -p "$DATA_DIR" "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR" "$STAGING_DIR" "${ROOT_DIR}/dist"
+  umask 077
+  if [[ ! -s "${ROOT_DIR}/secrets/rcon_password.txt" ]]; then
+    openssl rand -hex 32 > "${ROOT_DIR}/secrets/rcon_password.txt"
+  fi
+  if [[ ! -s "${ROOT_DIR}/secrets/restic_password.txt" ]]; then
+    openssl rand -base64 48 > "${ROOT_DIR}/secrets/restic_password.txt"
+  fi
+  if [[ ! -f "${ROOT_DIR}/secrets/aws_credentials" ]]; then
+    cp "${ROOT_DIR}/secrets/aws_credentials.example" "${ROOT_DIR}/secrets/aws_credentials"
+  fi
+  chmod 600 "${ROOT_DIR}/secrets/rcon_password.txt" "${ROOT_DIR}/secrets/restic_password.txt" \
+    "${ROOT_DIR}/secrets/aws_credentials"
+  info "Runtime directories and local secrets are ready"
+}
+
+command_start() {
+  load_settings
+  ensure_initialized
+  docker_ready
+  [[ "${EULA:-FALSE}" == "TRUE" ]] || die "Set EULA=TRUE in .env only after accepting the Minecraft EULA."
+  [[ "${PACKWIZ_URL:-}" == https://* ]] || die "PACKWIZ_URL must be an HTTPS Pages URL."
+  [[ "${PACKWIZ_URL}" != *YOUR_GITHUB_USER* && "${PACKWIZ_URL}" != *example.invalid* ]] \
+    || die "Replace the placeholder PACKWIZ_URL in .env."
+  service_running minecraft && die "The production server is already running."
+
+  offline_snapshot
+  info "Starting Minecraft and the two-hour local backup scheduler"
+  compose up -d minecraft backup-local
+
+  local attempts=0 container_id health
+  container_id="$(compose ps -q minecraft)"
+  while (( attempts < 60 )); do
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+    if [[ "$health" == "healthy" ]]; then
+      info "Server is healthy at 127.0.0.1:${MC_PORT:-25565}"
+      return 0
+    fi
+    if [[ "$health" == "exited" || "$health" == "dead" ]]; then
+      compose logs --tail 100 minecraft
+      die "Server exited during startup."
+    fi
+    sleep 3
+    attempts=$((attempts + 1))
+  done
+  compose logs --tail 100 minecraft
+  die "Server did not become healthy within three minutes."
+}
+
+command_stop() {
+  load_settings
+  ensure_initialized
+  docker_ready
+  service_running minecraft || { info "The production server is already stopped"; return 0; }
+
+  local skip_remote=false
+  [[ "${1:-}" == "--skip-remote" ]] && skip_remote=true
+  compose exec -T minecraft rcon-cli 'say Server stopping in 10 seconds. Saving and backing up...' >/dev/null || true
+  sleep 10
+  run_local_backup
+
+  if remote_backup_enabled && [[ "$skip_remote" == false ]]; then
+    run_remote_backup || die "Remote backup failed; server left running. Retry or use stop --skip-remote."
+  fi
+
+  info "Stopping backup scheduler and Minecraft gracefully"
+  compose stop -t 120 backup-local minecraft
+}
+
+command_status() {
+  load_settings
+  docker_ready
+  compose --profile staging ps
+  printf '\nProduction: 127.0.0.1:%s\nStaging:    127.0.0.1:%s\n' \
+    "${MC_PORT:-25565}" "${STAGING_PORT:-25566}"
+}
+
+command_mod() {
+  local action="${1:-}"
+  shift || true
+  case "$action" in
+    add)
+      [[ $# -ge 1 ]] || die "Usage: ./mcctl mod add <URL-or-slug>"
+      local source="$1" candidate_dir
+      candidate_dir="$(candidate_pack_dir)"
+      if [[ "$source" == *curseforge.com/* ]]; then
+        if ! packwiz_run_in "$candidate_dir" --yes curseforge add "$source"; then
+          rm -rf -- "$candidate_dir"
+          die "Packwiz could not add the CurseForge project; the real pack was not changed."
+        fi
+      elif [[ "$source" == *modrinth.com/* || "$source" != http* ]]; then
+        if ! packwiz_run_in "$candidate_dir" --yes modrinth add "$source"; then
+          rm -rf -- "$candidate_dir"
+          die "Packwiz could not add the Modrinth project; the real pack was not changed."
+        fi
+      elif [[ "$source" == https://* ]]; then
+        local external_name
+        external_name="${source##*/}"
+        external_name="${external_name%%\?*}"
+        external_name="${external_name%.jar}"
+        [[ -n "$external_name" ]] || external_name="external-mod"
+        if ! packwiz_run_in "$candidate_dir" --yes url add "$external_name" "$source"; then
+          rm -rf -- "$candidate_dir"
+          die "Packwiz could not add the direct URL; the real pack was not changed."
+        fi
+        warn "Direct URL added. Verify the author's redistribution license before publishing."
+      else
+        rm -rf -- "$candidate_dir"
+        die "Only Modrinth/CurseForge identifiers or HTTPS URLs are accepted."
+      fi
+      if ! validate_candidate_pack "$candidate_dir"; then
+        rm -rf -- "$candidate_dir"
+        die "Candidate validation failed; the real pack was not changed."
+      fi
+      promote_candidate_pack "$candidate_dir"
+      rm -rf -- "$candidate_dir"
+      info "Candidate added locally. Run stage start and test it before publishing."
+      ;;
+    remove)
+      [[ $# -eq 1 ]] || die "Usage: ./mcctl mod remove <name>"
+      local metadata_name="$1" metadata_path removed_dir
+      metadata_name="${metadata_name%.pw.toml}.pw.toml"
+      metadata_path="${ROOT_DIR}/pack/mods/${metadata_name}"
+      [[ -f "$metadata_path" ]] || die "No metadata file pack/mods/${metadata_name}"
+      removed_dir="${ROOT_DIR}/runtime/removed-mods/$(date '+%Y%m%d-%H%M%S')"
+      mkdir -p "$removed_dir"
+      mv "$metadata_path" "$removed_dir/"
+      info "Moved metadata to ${removed_dir#"${ROOT_DIR}"/}; it can be recovered until runtime is cleaned."
+      if refresh_and_validate_pack; then
+        :
+      else
+        mv "$removed_dir/$metadata_name" "$metadata_path"
+        packwiz_run refresh
+        die "Removal validation failed; metadata was restored."
+      fi
+      ;;
+    side)
+      [[ $# -eq 2 ]] || die "Usage: ./mcctl mod side <metadata-slug> <client|server|both>"
+      [[ "$2" == "client" || "$2" == "server" || "$2" == "both" ]] \
+        || die "Side must be client, server, or both."
+      local side_name="$1" side_path side_dir
+      side_name="${side_name%.pw.toml}.pw.toml"
+      side_dir="$(candidate_pack_dir)"
+      side_path="${side_dir}/mods/${side_name}"
+      if [[ ! -f "$side_path" ]]; then
+        rm -rf -- "$side_dir"
+        die "No metadata file pack/mods/${side_name}"
+      fi
+      sed -i -E "s/^side = \"(client|server|both)\"$/side = \"$2\"/" "$side_path"
+      if ! grep -Fxq "side = \"$2\"" "$side_path"; then
+        rm -rf -- "$side_dir"
+        die "Could not update side metadata in $side_name"
+      fi
+      if ! validate_candidate_pack "$side_dir"; then
+        rm -rf -- "$side_dir"
+        die "Side change failed validation; the real pack was not changed."
+      fi
+      promote_candidate_pack "$side_dir"
+      rm -rf -- "$side_dir"
+      info "Side change is a local candidate until staging and publication."
+      ;;
+    update)
+      [[ $# -eq 1 ]] || die "Usage: ./mcctl mod update <name|all>"
+      local update_dir
+      update_dir="$(candidate_pack_dir)"
+      if [[ "$1" == "all" ]]; then
+        if ! packwiz_run_in "$update_dir" --yes update --all; then
+          rm -rf -- "$update_dir"
+          die "Packwiz update failed; the real pack was not changed."
+        fi
+      else
+        if ! packwiz_run_in "$update_dir" --yes update "$1"; then
+          rm -rf -- "$update_dir"
+          die "Packwiz update failed; the real pack was not changed."
+        fi
+      fi
+      if ! validate_candidate_pack "$update_dir"; then
+        rm -rf -- "$update_dir"
+        die "Candidate rejected (for example, an alpha/beta artifact). The real pack was not changed."
+      fi
+      promote_candidate_pack "$update_dir"
+      rm -rf -- "$update_dir"
+      info "Updates are local candidates until stage testing and mod publish."
+      ;;
+    update-check)
+      docker_ready
+      local check_dir
+      check_dir="$(mktemp -d /tmp/wezza-update-check.XXXXXX)"
+      cp -a "${ROOT_DIR}/pack/." "$check_dir/"
+      info "Checking updates in disposable directory $check_dir"
+      if PACK_DIR="$check_dir" compose --profile tools run --rm --no-deps packwiz --yes update --all; then
+        diff -ru --exclude=index.toml --exclude=pack.toml "${ROOT_DIR}/pack" "$check_dir" || true
+      else
+        warn "Packwiz update check failed; the real pack was not changed."
+      fi
+      rm -rf -- "$check_dir"
+      ;;
+    check)
+      refresh_and_validate_pack
+      ;;
+    publish)
+      local force=false
+      [[ "${1:-}" == "--force" ]] && force=true
+      refresh_and_validate_pack
+      if [[ "$force" == false ]]; then
+        [[ -s "$ACCEPTED_FILE" ]] || die "No accepted staging test. Run './mcctl stage accept' or publish --force."
+        [[ "$(cat "$ACCEPTED_FILE")" == "$(pack_sha256)" ]] \
+          || die "Pack changed after staging acceptance; test and accept it again."
+      fi
+      git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || die "This environment has no usable .git repository. Initialize Git before publishing."
+      git -C "$ROOT_DIR" remote get-url origin >/dev/null 2>&1 \
+        || die "Configure the GitHub remote named origin before publishing."
+      git -C "$ROOT_DIR" add pack
+      git -C "$ROOT_DIR" diff --cached --quiet && die "There are no Packwiz changes to publish."
+      git -C "$ROOT_DIR" commit -m "chore(pack): publish approved mod changes"
+      git -C "$ROOT_DIR" push origin HEAD
+      info "Pushed. GitHub Pages will deploy the approved manifest."
+      ;;
+    *) die "Unknown mod action: ${action:-<missing>}" ;;
+  esac
+}
+
+command_stage() {
+  local action="${1:-start}"
+  load_settings
+  ensure_initialized
+  docker_ready
+  case "$action" in
+    start)
+      refresh_and_validate_pack
+      if service_running minecraft; then
+        run_local_backup
+      elif [[ -n "$(find "$DATA_DIR" -mindepth 1 -print -quit)" ]]; then
+        offline_snapshot
+      fi
+
+      local previous archive
+      if [[ -d "${STAGING_DIR}/data" && -n "$(find "${STAGING_DIR}/data" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        previous="${STAGING_DIR}/data.previous.$(date '+%Y%m%d-%H%M%S')"
+        mv "${STAGING_DIR}/data" "$previous"
+      fi
+      mkdir -p "${STAGING_DIR}/data"
+      archive="$(latest_backup || true)"
+      if [[ -n "$archive" ]]; then
+        info "Restoring $(basename "$archive") into isolated staging data"
+        tar -xf "$archive" -C "${STAGING_DIR}/data"
+      else
+        info "No backup exists; staging will use a new empty world"
+      fi
+      rm -f -- "$ACCEPTED_FILE"
+      compose --profile staging up -d pack-server minecraft-staging
+      info "Staging started at 127.0.0.1:${STAGING_PORT:-25566}; inspect logs before acceptance."
+      ;;
+    stop)
+      compose --profile staging stop -t 120 minecraft-staging pack-server
+      ;;
+    logs)
+      compose --profile staging logs -f minecraft-staging
+      ;;
+    accept)
+      service_running minecraft-staging || die "Staging is not running."
+      local staging_id staging_health
+      staging_id="$(compose --profile staging ps -q minecraft-staging)"
+      staging_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$staging_id")"
+      [[ "$staging_health" == "healthy" ]] || die "Staging is not healthy: $staging_health"
+      pack_sha256 > "$ACCEPTED_FILE"
+      info "Accepted the currently tested Packwiz revision."
+      ;;
+    *) die "Unknown stage action: $action" ;;
+  esac
+}
+
+command_backup_list() {
+  mkdir -p "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR"
+  find "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
+    \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+    -printf '%TY-%Tm-%Td %TH:%TM  %10s  %f\n' | sort -r
+}
+
+command_restore_test() {
+  [[ $# -eq 1 ]] || die "Usage: ./mcctl restore-test <archive>"
+  local archive target
+  archive="$(resolve_backup "$1")"
+  target="${ROOT_DIR}/runtime/restore-test/$(date '+%Y%m%d-%H%M%S')"
+  mkdir -p "$target"
+  tar -xf "$archive" -C "$target"
+  info "Restored safely to ${target#"${ROOT_DIR}"/}"
+}
+
+command_restore() {
+  [[ $# -eq 2 && "$2" == "--confirm" ]] || die "Usage: ./mcctl restore <archive> --confirm"
+  docker_ready
+  service_running minecraft && die "Stop the production server before restoring."
+  local archive old_data
+  archive="$(resolve_backup "$1")"
+  old_data="${ROOT_DIR}/runtime/data.pre-restore.$(date '+%Y%m%d-%H%M%S')"
+  mv "$DATA_DIR" "$old_data"
+  mkdir -p "$DATA_DIR"
+  if ! tar -xf "$archive" -C "$DATA_DIR"; then
+    rmdir "$DATA_DIR" 2>/dev/null || true
+    mv "$old_data" "$DATA_DIR"
+    die "Restore failed; original data was put back."
+  fi
+  info "Restore complete. Previous data remains at ${old_data#"${ROOT_DIR}"/}"
+}
+
+command_client() {
+  local action="${1:-}"
+  case "$action" in
+    build)
+      load_settings
+      local pack_url="${2:-${PACKWIZ_URL:-}}"
+      [[ -n "$pack_url" ]] || die "Provide PACK_URL or set PACKWIZ_URL in .env."
+      python3 "${ROOT_DIR}/tools/build_client.py" --pack-dir "${ROOT_DIR}/pack" \
+        --pack-url "$pack_url" --output "${ROOT_DIR}/dist/wezza-mc-prism.zip"
+      ;;
+    mrpack)
+      [[ "${2:-}" == "--confirm" ]] \
+        || die "Usage: ./mcctl client mrpack --confirm (confirm every bundled mod permits redistribution)"
+      local export_dir exported
+      export_dir="$(candidate_pack_dir)"
+      if ! validate_candidate_pack "$export_dir"; then
+        rm -rf -- "$export_dir"
+        die "Pack validation failed; no .mrpack was created."
+      fi
+      if ! packwiz_run_in "$export_dir" modrinth export; then
+        rm -rf -- "$export_dir"
+        die "Packwiz export failed; no .mrpack was created."
+      fi
+      exported="$(find "$export_dir" -maxdepth 1 -type f -name '*.mrpack' -print -quit)"
+      if [[ -z "$exported" ]]; then
+        rm -rf -- "$export_dir"
+        die "Packwiz did not produce an .mrpack file."
+      fi
+      mkdir -p "${ROOT_DIR}/dist"
+      cp "$exported" "${ROOT_DIR}/dist/wezza-mc-manual.mrpack"
+      rm -rf -- "$export_dir"
+      info "Built dist/wezza-mc-manual.mrpack"
+      ;;
+    *) die "Usage: ./mcctl client build [PACK_URL] | client mrpack --confirm" ;;
+  esac
+}
+
+main() {
+  local command="${1:-}"
+  shift || true
+  case "$command" in
+    init) command_init "$@" ;;
+    start) command_start "$@" ;;
+    stop) command_stop "$@" ;;
+    restart) command_stop "$@"; command_start ;;
+    status) load_settings; command_status "$@" ;;
+    logs) load_settings; docker_ready; compose logs -f minecraft ;;
+    console)
+      load_settings; docker_ready
+      local container_id
+      container_id="$(compose ps -q minecraft)"
+      [[ -n "$container_id" ]] || die "The production server is not running."
+      docker attach "$container_id"
+      ;;
+    rcon)
+      [[ $# -ge 1 ]] || die "Usage: ./mcctl rcon <command...>"
+      load_settings; docker_ready; compose exec -T minecraft rcon-cli "$*"
+      ;;
+    whitelist)
+      load_settings; docker_ready
+      case "${1:-}" in
+        add|remove) [[ $# -eq 2 ]] || die "Usage: ./mcctl whitelist add|remove <player>"; compose exec -T minecraft rcon-cli "whitelist $1 $2" ;;
+        list) compose exec -T minecraft rcon-cli 'whitelist list' ;;
+        *) die "Usage: ./mcctl whitelist add|remove|list [player]" ;;
+      esac
+      ;;
+    mod) command_mod "$@" ;;
+    stage) command_stage "$@" ;;
+    backup)
+      load_settings; ensure_initialized; docker_ready
+      if service_running minecraft; then run_local_backup; else offline_snapshot; fi
+      ;;
+    backup-list) command_backup_list ;;
+    restore-test) command_restore_test "$@" ;;
+    restore) command_restore "$@" ;;
+    client) command_client "$@" ;;
+    help|-h|--help|"") usage ;;
+    *) die "Unknown command: $command. Run './mcctl help'." ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,72 @@
+name: Publish Packwiz to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pack/**"
+      - "site/**"
+      - "tools/build_client.py"
+      - "tools/validate_pack.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Install pinned Packwiz
+        run: go install github.com/packwiz/packwiz@dfd8b68a4796c763e25bad50265ea1f1233e24f1
+
+      - name: Validate source manifest
+        run: |
+          cd pack
+          "$(go env GOPATH)/bin/packwiz" refresh
+          cd ..
+          python3 tools/validate_pack.py pack
+          git diff --exit-code -- pack
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Assemble static site and Prism client
+        run: |
+          mkdir -p public/downloads
+          cp -a pack/. public/
+          cp site/index.html public/index.html
+          python3 tools/validate_pack.py pack --json-output public/mods.json
+          python3 tools/build_client.py \
+            --pack-url "${{ steps.pages.outputs.base_url }}/pack.toml" \
+            --output public/downloads/wezza-mc-prism.zip
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

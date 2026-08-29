@@ -1,0 +1,46 @@
+hash-format = "sha256"
+
+[[files]]
+file = "mods/fabric-api.pw.toml"
+hash = "6f89d349cbad7c499f7a33b145b3897ca3f097e959c7c264f8058fa933ae28f3"
+metafile = true
+
+[[files]]
+file = "mods/ferrite-core.pw.toml"
+hash = "bf3fac7b7f8b27287803c1134fabe34acc6a23d0629619b6852a22efe4dd8482"
+metafile = true
+
+[[files]]
+file = "mods/krypton.pw.toml"
+hash = "35665e369655155b97b789cba7858b7ee7cbca55083f1ee3627667022201ce3c"
+metafile = true
+
+[[files]]
+file = "mods/lithium.pw.toml"
+hash = "94505024e212465ee24626b22fcce49fbcb9f3f2371fd1b7e528d740c27e4834"
+metafile = true
+
+[[files]]
+file = "mods/refined-storage.pw.toml"
+hash = "5db41ba392400c8d3af92147df387a3c1a1c658b58fa39db27fb42a0c636769a"
+metafile = true
+
+[[files]]
+file = "mods/servercore.pw.toml"
+hash = "10ebec532effdba30bdb8af2084a11c1294466b8d0b012946c665a7f5cc9b851"
+metafile = true
+
+[[files]]
+file = "mods/sodium.pw.toml"
+hash = "274b895e9b4c59beba5f4774a33570c04e939d0bd6e38d349e8ac6fd5cf098d1"
+metafile = true
+
+[[files]]
+file = "mods/spark.pw.toml"
+hash = "0b8ddbfcfb2aa053d0317e7145d60e00485e4ae6c5ef75a9ec9ce0b533137e18"
+metafile = true
+
+[[files]]
+file = "mods/time-in-a-bottle.pw.toml"
+hash = "86e2ed135aef31a2fe2f6c6457fc2c955249584c5203074f3f36b98236de1678"
+metafile = true

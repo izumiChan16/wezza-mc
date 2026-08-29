@@ -1,0 +1,13 @@
+name = "Wezza MC"
+author = "Wezza MC"
+version = "0.1.0"
+pack-format = "packwiz:1.1.0"
+
+[index]
+file = "index.toml"
+hash-format = "sha256"
+hash = "8503f1aa9917a5f1a34c4170babbe31cbbbf549ac08036feffd359555f158331"
+
+[versions]
+fabric = "0.19.3"
+minecraft = "26.1.2"
