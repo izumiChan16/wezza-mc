@@ -2,5 +2,6 @@
 .git/
 .github/
 *.mrpack
+redistribution.toml
 *.zip
 README*

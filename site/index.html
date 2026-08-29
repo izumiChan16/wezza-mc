@@ -128,6 +128,8 @@
       font-size: .84rem;
     }
 
+    .requirements a { color: var(--accent); font-weight: 700; }
+
     .mod-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -184,6 +186,7 @@
       <dl class="info-list">
         <div class="info-row"><dt>Minecraft</dt><dd>Java 版 26.1.2</dd></div>
         <div class="info-row"><dt>模组加载器</dt><dd>Fabric 0.19.3</dd></div>
+        <div class="info-row"><dt>整合包版本</dt><dd id="pack-version">26.1.2-r1</dd></div>
         <div class="info-row"><dt>游戏模式</dt><dd>生存</dd></div>
         <div class="info-row"><dt>难度</dt><dd>困难</dd></div>
         <div class="info-row"><dt>加入限制</dt><dd>正版验证、白名单</dd></div>
@@ -196,12 +199,12 @@
       <h2 id="client-title">客户端</h2>
       <div class="download">
         <div>
-          <strong>Wezza MC 客户端配置</strong>
-          <p>在 Prism Launcher 中选择“添加实例 → 导入”。</p>
+          <strong>Wezza MC 标准整合包</strong>
+          <p>在 PCL2 中导入下载的 .mrpack 文件。</p>
         </div>
-        <a class="button" href="downloads/wezza-mc-prism.zip" download>下载 ZIP</a>
+        <a class="button" href="downloads/wezza-mc-latest.mrpack" download>下载 MRPACK</a>
       </div>
-      <p class="requirements">需要 Prism Launcher、Java 25；建议分配 6 GB 内存。</p>
+      <p class="requirements">需要 Java 25，建议分配 6 GB 内存。已有版本请先查看<a href="updates.html">更新说明</a>。</p>
     </section>
 
     <section aria-labelledby="mods-title">
@@ -233,6 +236,16 @@
       .catch(() => {
         status.textContent = '暂时无法读取模组列表。';
       });
+
+    fetch('release.json')
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then((release) => {
+        document.querySelector('#pack-version').textContent = release.pack_version;
+      })
+      .catch(() => {});
   </script>
 </body>
 </html>

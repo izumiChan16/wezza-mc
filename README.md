@@ -41,6 +41,8 @@
 
 模组是修改或扩展游戏的 `.jar` 文件。Fabric 是让 Minecraft 能加载这些模组的工具。
 
+这里口语中说的“插件”实际应按 **Fabric 模组** 管理。本服务器不是 Paper/Spigot 服务端，不能直接安装 Bukkit、Spigot 或 Paper 插件。
+
 服务器和玩家不一定安装完全相同的模组：
 
 - **双方**：服务器和所有玩家都要安装，例如 Refined Storage。
@@ -55,9 +57,11 @@ Docker 把服务器程序、Java 和运行环境放在容器中。这样不用�
 
 Windows 中的 Linux 环境。本项目放在 Arch Linux WSL 的 `/home/izumi/wezza_mc`，管理命令也在这里运行。
 
-### Prism Launcher
+### PCL2 与 MRPACK
 
-玩家使用的 Minecraft 启动器。玩家只需导入服务器页面提供的 ZIP，不要自己逐个寻找模组。
+PCL2 是本项目面向玩家说明的启动器。服务器页面提供的是标准 Modrinth 整合包文件（`.mrpack`），PCL2 会在导入时读取其中的下载地址和哈希并取得客户端需要的模组。
+
+`.mrpack` 是一个版本快照，不会让已经导入的游戏实例永久自动同步。后续如何更新取决于这次发布的类型：少量变更可以按更新页手动处理；大批变更或游戏版本升级需要导入新的 `.mrpack`。
 
 ### Packwiz
 
@@ -65,13 +69,13 @@ Windows 中的 Linux 环境。本项目放在 Arch Linux WSL 的 `/home/izumi/we
 
 ### GitHub Pages
 
-一个公开静态下载地址，用来放客户端配置和模组清单。它不是 Minecraft 服务器，也不保存世界。
+一个公开静态地址，用来放基本服务器信息、更新说明和 `.mrpack` 下载。它不是 Minecraft 服务器，也不保存世界。
 
 ## 整个系统如何工作
 
 ```text
 玩家电脑
-  Prism Launcher ──下载客户端配置和模组──> GitHub Pages
+  PCL2 ──导入标准 .mrpack 并下载客户端模组──> GitHub Pages / 模组源站
        │
        └────────使用服务器地址联机─────────────┐
                                               │
@@ -82,11 +86,12 @@ Arch WSL                                      ├── runtime/data：世界
   ./mcctl ──管理 Docker Desktop───────────────└── runtime/backups：备份
 ```
 
-需要记住的只有三点：
+需要记住的只有四点：
 
 1. `./mcctl` 是管理员的统一入口。
 2. `runtime/data` 是正式世界，不能随意删除。
 3. 改模组后必须先测试，再发布给服务器和玩家。
+4. `.mrpack` 代表一个确定版本；已有玩家不会在启动游戏时自动更新。
 
 ## 当前服务器配置
 
@@ -254,17 +259,21 @@ Windows 上现有的内网穿透客户端只转发：
 
 玩家按以下步骤操作：
 
-1. 安装并打开 Prism Launcher。
-2. 在服务器信息页下载 `wezza-mc-prism.zip`。
-3. 在 Prism 中选择 **添加实例 → 导入**，选择刚下载的 ZIP。
-4. 确认该实例使用 Java 25。
-5. 建议给实例分配 6 GB 内存。
-6. 启动实例；首次启动会下载所需文件。
-7. 在多人游戏中添加管理员提供的服务器地址。
+1. 安装并打开 PCL2。
+2. 在服务器信息页点击“下载 MRPACK”，得到 `wezza-mc-latest.mrpack`。
+3. 把 `.mrpack` 直接拖入 PCL2，或使用 PCL2 的导入整合包功能；不要先解压。
+4. 等待 PCL2 在导入过程中下载模组并创建版本。
+5. 确认该版本使用 Java 25，建议分配 6 GB 内存。
+6. 启动游戏，在多人游戏中添加管理员提供的服务器地址。
 
-玩家不要解压 ZIP，也不要把它复制进 `.minecraft/mods`。
+服务器专用模组会在 `.mrpack` 中标为客户端不支持，PCL2 导入时不会安装它们。
 
-以后正常从同一个 Prism 实例启动即可。管理员发布模组变更后，启动器会在进入游戏前取得新文件；玩家一般不需要重新下载 ZIP。
+以后能否继续使用原版本，以[更新说明页](https://izumichan16.github.io/wezza-mc/updates.html)为准：
+
+- **小更新**：页面会列出要添加、替换或删除的准确文件。已有玩家可以手动修改该版本的 `mods` 目录，不必重新导入；新玩家直接导入当前 `.mrpack`。
+- **完整更新**：页面会明确要求重新导入。通常用于 Minecraft/Fabric 升级、大批模组变化或依赖关系复杂的变更。建议创建新版本，确认存档和设置无误后再删除旧版本。
+
+不要混用不同发布版本的模组，也不要看到某个模组有新版就自行更新；服务器和客户端版本可能因此不一致。
 
 ## 日常开服和关服
 
@@ -409,7 +418,7 @@ cd /home/izumi/wezza_mc
 ./mcctl mod add https://www.curseforge.com/minecraft/mc-mods/example-mod
 ```
 
-如果作者关闭第三方下载，自动安装可能无法工作。不要未经许可把作者的 JAR 上传到 GitHub Pages。
+如果作者关闭第三方下载，自动安装可能无法工作。不要未经许可把作者的 JAR 上传到 GitHub Pages，也不要把“网站上可以下载”当作“允许放进整合包再分发”。
 
 ### 添加作者提供的直接下载地址
 
@@ -420,6 +429,25 @@ cd /home/izumi/wezza_mc
 ```
 
 直接地址通常不能自动发现新版本。发布前必须核对来源、哈希和许可证。
+
+### 非 Modrinth 文件的再分发确认
+
+Modrinth 文件可以由标准 `.mrpack` 写入源站下载地址。CurseForge 或作者直链的许可条件并不统一，因此发布脚本默认拒绝它们。确认作者明确允许整合包再分发后，在 `pack/redistribution.toml` 为对应元数据登记：
+
+```toml
+[files."mods/example.pw.toml"]
+approved = true
+metadata-sha256 = "该 .pw.toml 文件当前的 SHA-256"
+license-url = "https://作者给出的许可页面"
+```
+
+取得哈希：
+
+```bash
+sha256sum pack/mods/example.pw.toml
+```
+
+每次文件版本或下载信息变化，元数据哈希都会变化，旧批准会自动失效，必须重新核对许可。`pack/redistribution.toml` 只供发布检查，不会放进玩家整合包。
 
 ### 检查更新
 
@@ -525,13 +553,38 @@ cd /home/izumi/wezza_mc
 ./mcctl stop
 ```
 
-### 5. 发布
+### 5. 判断是小更新还是完整更新
+
+发布命令必须明确选择一种类型：
+
+| 类型 | 适用情况 | 已有玩家怎么做 |
+|---|---|---|
+| `small` | 少量、关系简单的模组添加、替换或删除 | 按更新页逐项手动处理，不重新导入 |
+| `full` | Minecraft/Fabric 升级、大批模组变更、依赖关系复杂或管理员认为手动操作风险较高 | 下载并重新导入当前 `.mrpack` |
+
+Minecraft 或 Fabric Loader 有变化时，工具会拒绝 `small`。模组数量的界线不写死，由管理员根据实际复杂度决定；拿不准时使用 `full`。
+
+每次发布无论类型，Pages 都会生成一份包含当前完整清单的 `.mrpack`，供新玩家或需要重装的人使用。
+
+### 6. 发布
+
+少量变更：
 
 ```bash
-./mcctl mod publish
+./mcctl mod publish small
 ```
 
-它会验证测试记录、提交 `pack/` 并推送到 GitHub。GitHub Actions 随后更新 Pages。
+完整更新：
+
+```bash
+./mcctl mod publish full
+```
+
+命令会验证测试记录和再分发许可，自动生成下一个整合包版本、更新说明，验证标准 `.mrpack`，提交 `pack/` 与 `site/release.json`，然后推送到 GitHub。GitHub Actions 随后生成下载文件并更新 Pages。
+
+发布必须从 `main` 分支执行。为防止漏提交服务器配置，命令发现 `pack/` 和 `site/release.json` 以外还有未提交文件时会停止；先单独检查并提交那些文件，再发布模组清单。
+
+整合包版本使用 `Minecraft版本-r序号`，例如 `26.1.2-r1`、`26.1.2-r2`。同一 Minecraft 版本内每发布一次就增加序号；Minecraft 版本变化后从 `r1` 开始。
 
 在下面的页面确认工作流成功：
 
@@ -540,12 +593,13 @@ cd /home/izumi/wezza_mc
 紧急情况下可以跳过测试记录：
 
 ```bash
-./mcctl mod publish --force
+./mcctl mod publish small --force
+./mcctl mod publish full --force
 ```
 
 除非你已经用其他方式完成等价测试，否则不要使用 `--force`。
 
-### 6. 重启正式服并通知玩家
+### 7. 重启正式服并通知玩家
 
 Pages 部署成功后：
 
@@ -554,13 +608,17 @@ Pages 部署成功后：
 ./mcctl logs
 ```
 
-确认服务器健康后再通知玩家启动 Prism。影响如下：
+确认服务器健康并且 Pages 工作流完成后，把更新说明页发给玩家：
 
-| 变更类型 | 服务器 | 玩家 |
+<https://izumichan16.github.io/wezza-mc/updates.html>
+
+影响如下：
+
+| 变更范围 | 服务器 | 玩家 |
 |---|---|---|
-| 仅服务端 | 下次开服安装 | 无需下载 |
-| 仅客户端 | 无需安装 | 下次启动安装 |
-| 双方 | 下次开服安装 | 下次启动安装 |
+| 仅服务端 | 下次开服安装 | 无需处理；更新页不会列为玩家操作 |
+| 仅客户端 | 无需安装 | 小更新时手动处理，完整更新时重新导入 |
+| 双方 | 下次开服安装 | 小更新时手动处理，完整更新时重新导入 |
 
 ## Git 和 GitHub 的日常使用
 
@@ -586,13 +644,14 @@ git push
 
 ### 模组变更
 
-正常情况下使用：
+完成隔离测试后，根据变更规模选择：
 
 ```bash
-./mcctl mod publish
+./mcctl mod publish small
+./mcctl mod publish full
 ```
 
-不要同时手动提交一半的 `pack/` 文件。`pack.toml`、`index.toml` 和 `.pw.toml` 的哈希必须保持一致。
+该命令本身会提交并推送发布内容，不要随后再手动提交一半的 `pack/` 文件。`pack.toml`、`index.toml` 和 `.pw.toml` 的哈希必须保持一致。
 
 ### 查看 GitHub Actions
 
@@ -765,7 +824,35 @@ rg '26\.1\.2|0\.19\.3|java25' .
 
 7. 至少再做一次停止和重新启动测试。
 
-8. 所有检查通过后提交升级分支、合并到 `main` 并发布。正式服第一次升级启动前再次确认备份可用。
+8. 所有检查通过后，先把测试结果保存为分支提交：
+
+```bash
+git add -A
+git commit -m "test: validate Minecraft 新版本 upgrade"
+```
+
+9. 回到 `main`，把升级变更合并为尚未提交的工作区内容：
+
+```bash
+git switch main
+git merge --squash upgrade/minecraft-新版本
+git restore --staged .
+```
+
+10. 先提交除模组清单和发布记录之外的配套变更：
+
+```bash
+git add -A -- . ':(exclude)pack' ':(exclude)site/release.json'
+git commit -m "chore: prepare Minecraft 新版本"
+```
+
+11. 保持 `pack/` 为待发布变更，以完整更新发布：
+
+```bash
+./mcctl mod publish full
+```
+
+正式服第一次升级启动前再次确认备份可用，并通知所有玩家重新导入新 `.mrpack`。
 
 如果任何核心模组尚未支持新版本，就继续运行当前版本，不要为了升级 Minecraft 而删除核心内容。
 
@@ -827,12 +914,12 @@ runtime/backups/offline/
 ```text
 wezza_mc/
 ├── .github/workflows/     GitHub 自动校验和 Pages 发布
-├── pack/                  模组清单与哈希
-│   └── mods/              每个模组的元数据
+├── pack/                  模组清单、版本与再分发批准
+│   └── mods/              每个模组的 Packwiz 元数据
 ├── runtime/               世界、备份、测试服数据，不提交
 ├── secrets/               RCON 和备份密钥，不提交真实值
-├── site/                  GitHub Pages 页面
-├── tools/                 清单校验和 Prism ZIP 构建工具
+├── site/                  GitHub Pages 基本信息和更新数据
+├── tools/                 清单、发布记录和 MRPACK 校验工具
 ├── .env                   本机设置，不提交
 ├── compose.yaml           Docker 服务定义
 ├── mcctl                  管理命令入口
@@ -887,10 +974,17 @@ docker compose logs --tail 200 minecraft
 按顺序检查：
 
 1. GitHub Pages 工作流是否成功。
-2. 玩家是否从导入的 Wezza MC Prism 实例启动。
-3. 玩家是否跳过或删除了启动前命令。
-4. 正式服是否在 Pages 发布后重新启动过。
-5. 模组的安装位置是否正确标为 `client`、`server` 或 `both`。
+2. 玩家使用的整合包版本是否与更新说明页一致。
+3. 如果是小更新，玩家是否逐项完成了页面列出的添加、替换或删除操作。
+4. 如果是完整更新，玩家是否重新导入了新 `.mrpack`，而不是继续启动旧版本。
+5. 正式服是否在 Pages 发布后重新启动过。
+6. 模组的安装位置是否正确标为 `client`、`server` 或 `both`。
+
+### PCL2 导入后没有模组
+
+先确认导入的是扩展名为 `.mrpack` 的当前文件，并且没有手动解压。正常情况下，PCL2 会在**导入过程**中下载客户端需要的模组；导入后的 `mods` 目录不应为空。
+
+如果失败，删除这次创建的不完整版本，重新从服务器信息页下载并导入，再检查 PCL2 下载日志中是否有网络、源站或哈希错误。不要用手工复制服务端 `mods` 目录代替，因为其中含有客户端不应安装的服务端专用模组。
 
 ### Pages 没有更新
 
@@ -973,7 +1067,8 @@ Packwiz 校验失败时不要手动修改 `index.toml` 哈希，应让 `./mcctl 
 | `./mcctl mod remove <slug>` | 可恢复地删除元数据 |
 | `./mcctl mod side <slug> <side>` | 修改安装位置 |
 | `./mcctl mod check` | 刷新并验证清单 |
-| `./mcctl mod publish` | 发布已通过测试的清单 |
+| `./mcctl mod publish small` | 发布小更新，已有玩家按页面手动处理 |
+| `./mcctl mod publish full` | 发布完整更新，要求已有玩家重新导入 |
 
 ### 测试服
 
@@ -997,7 +1092,6 @@ Packwiz 校验失败时不要手动修改 `index.toml` 哈希，应让 `./mcctl 
 
 | 命令 | 作用 |
 |---|---|
-| `./mcctl client build` | 本地生成 Prism 导入 ZIP |
-| `./mcctl client mrpack --confirm` | 生成手动 `.mrpack` 快照 |
+| `./mcctl client build` | 本地生成当前标准 `.mrpack` 到 `dist/` |
 
-`.mrpack` 是固定时间点的 Modrinth 整合包清单，不承担本项目的日常更新。只有确认所有被打包文件允许再分发时才生成它。
+该本地构建也会执行再分发与内容校验。线上文件由 GitHub Pages 工作流在每次发布后重新生成；不要手动上传一个未经校验的 JAR 或整合包。

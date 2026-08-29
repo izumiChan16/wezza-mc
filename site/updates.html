@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Wezza MC 当前整合包更新说明">
+  <title>Wezza MC | 更新说明</title>
+  <style>
+    :root {
+      --background: #f2f3ef;
+      --surface: #ffffff;
+      --text: #1c211e;
+      --muted: #687069;
+      --line: #d7dbd6;
+      --accent: #276749;
+      --accent-soft: #e6f0e9;
+      --warning: #9a4b12;
+      --warning-soft: #faeadc;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background: var(--background);
+      font-family: "BIZ UDPGothic", "Noto Sans CJK SC", "Microsoft YaHei UI", sans-serif;
+      line-height: 1.65;
+    }
+
+    a { color: var(--accent); }
+
+    .page {
+      width: min(760px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 72px;
+    }
+
+    .back { display: inline-block; margin-bottom: 28px; font-size: .86rem; }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      padding-bottom: 22px;
+      border-bottom: 2px solid var(--text);
+    }
+
+    h1 { margin: 0; font-size: clamp(1.8rem, 6vw, 2.8rem); line-height: 1.1; letter-spacing: -.035em; }
+    h2 { margin: 38px 0 14px; font-size: 1rem; letter-spacing: .05em; }
+    p { margin: 0; }
+
+    .version { color: var(--muted); font-size: .84rem; text-align: right; }
+    .version strong { display: block; color: var(--text); font-size: 1rem; }
+
+    .notice {
+      margin-top: 28px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      background: var(--surface);
+    }
+
+    .notice.full { border-left-color: var(--warning); background: var(--warning-soft); }
+    .notice strong { display: block; margin-bottom: 5px; }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      margin-top: 16px;
+      padding: 9px 15px;
+      border: 1px solid var(--accent);
+      border-radius: 3px;
+      color: #fff;
+      background: var(--accent);
+      font-size: .9rem;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    ol { margin: 0; padding-left: 1.4rem; }
+    li + li { margin-top: 8px; }
+
+    .change-list { border-top: 1px solid var(--line); }
+
+    .change {
+      display: grid;
+      grid-template-columns: 6rem 1fr;
+      gap: 18px;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .action { color: var(--muted); font-size: .82rem; font-weight: 700; }
+    .change strong { display: block; }
+    .files { margin-top: 4px; color: var(--muted); font-family: Consolas, monospace; font-size: .78rem; overflow-wrap: anywhere; }
+    .download-link { display: inline-block; margin-top: 7px; font-size: .84rem; font-weight: 700; }
+    .empty { padding: 18px 0; color: var(--muted); border-bottom: 1px solid var(--line); }
+    .fine-print { margin-top: 12px; color: var(--muted); font-size: .8rem; }
+
+    footer {
+      margin-top: 52px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .76rem;
+    }
+
+    [hidden] { display: none !important; }
+
+    @media (max-width: 560px) {
+      .page { padding-top: 30px; }
+      header { align-items: start; }
+      .change { grid-template-columns: 1fr; gap: 4px; }
+      .button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <a class="back" href="index.html">← 返回服务器信息</a>
+
+    <header>
+      <h1>更新说明</h1>
+      <div class="version"><strong id="pack-version">读取中</strong><span id="release-date"></span></div>
+    </header>
+
+    <div class="notice" id="release-notice">
+      <strong id="release-title">正在读取当前发布信息……</strong>
+      <p id="release-message"></p>
+      <a class="button" href="downloads/wezza-mc-latest.mrpack" download>下载当前 MRPACK</a>
+    </div>
+
+    <section id="full-guide" hidden>
+      <h2>本次操作</h2>
+      <ol>
+        <li>下载当前 `.mrpack`。</li>
+        <li>在 PCL2 中把它导入为一个新版本，不要覆盖仍可使用的旧版本。</li>
+        <li>首次启动并确认模组、设置和服务器连接正常。</li>
+        <li>确认无误后再删除旧版本。</li>
+      </ol>
+    </section>
+
+    <section id="small-guide" hidden>
+      <h2>手动更新方法</h2>
+      <ol>
+        <li>完全关闭正在运行的游戏。</li>
+        <li>在 PCL2 的版本设置中打开 Mod 管理。</li>
+        <li>按照下方清单删除旧文件并下载新文件。</li>
+        <li>不要同时保留同一个模组的新旧两个 JAR。</li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="changes-title">
+      <h2 id="changes-title">玩家端变化</h2>
+      <div class="change-list" id="change-list"></div>
+      <p class="fine-print">仅服务端模组不会列在这里，也不需要玩家手动处理。</p>
+    </section>
+
+    <footer>更新类型由服务器管理员在发布前根据兼容性和变更规模决定。</footer>
+  </main>
+
+  <script>
+    const actionLabels = {
+      added: '新增',
+      updated: '替换',
+      removed: '删除',
+      changed: '设置变化'
+    };
+
+    function appendFileLine(container, text) {
+      if (!text) return;
+      const line = document.createElement('div');
+      line.className = 'files';
+      line.textContent = text;
+      container.append(line);
+    }
+
+    function renderChange(change) {
+      const row = document.createElement('div');
+      row.className = 'change';
+
+      const action = document.createElement('div');
+      action.className = 'action';
+      const operation = change.player_operation || change.action;
+      action.textContent = actionLabels[operation] || operation;
+
+      const detail = document.createElement('div');
+      const name = document.createElement('strong');
+      name.textContent = change.name;
+      detail.append(name);
+
+      if (operation === 'updated') {
+        appendFileLine(detail, `删除：${change.old?.filename || '旧文件'}`);
+        appendFileLine(detail, `安装：${change.new?.filename || '新文件'}`);
+      } else if (operation === 'added') {
+        appendFileLine(detail, `安装：${change.new?.filename || '新文件'}`);
+      } else if (operation === 'removed') {
+        appendFileLine(detail, `删除：${change.old?.filename || '旧文件'}`);
+      } else {
+        appendFileLine(detail, change.new?.filename || change.old?.filename);
+      }
+
+      const downloadUrl = change.new?.download_url || change.new?.version_url;
+      if (downloadUrl && operation !== 'removed') {
+        const link = document.createElement('a');
+        link.className = 'download-link';
+        link.href = downloadUrl;
+        link.textContent = '下载准确版本';
+        detail.append(link);
+      }
+
+      row.append(action, detail);
+      return row;
+    }
+
+    fetch('release.json')
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then((release) => {
+        document.querySelector('#pack-version').textContent = release.pack_version;
+        document.querySelector('#release-date').textContent = new Date(release.published_at).toLocaleDateString('zh-CN');
+
+        const notice = document.querySelector('#release-notice');
+        const title = document.querySelector('#release-title');
+        const message = document.querySelector('#release-message');
+        if (release.requires_reimport) {
+          notice.classList.add('full');
+          title.textContent = '本次必须重新导入整合包';
+          message.textContent = release.message || '本次包含大版本或复杂变更，不提供逐个模组的手动更新方案。';
+          document.querySelector('#full-guide').hidden = false;
+        } else {
+          title.textContent = '本次可以手动更新';
+          message.textContent = release.message || '已有玩家可以按照下方清单处理；新玩家直接下载当前整合包。';
+          document.querySelector('#small-guide').hidden = false;
+        }
+
+        const changes = release.changes.filter((change) => change.player_action);
+        const list = document.querySelector('#change-list');
+        if (changes.length) {
+          list.replaceChildren(...changes.map(renderChange));
+        } else {
+          const empty = document.createElement('p');
+          empty.className = 'empty';
+          empty.textContent = release.requires_reimport
+            ? '整包更新不提供逐项操作清单。'
+            : '本次没有需要玩家处理的模组变化。';
+          list.replaceChildren(empty);
+        }
+      })
+      .catch(() => {
+        document.querySelector('#release-title').textContent = '暂时无法读取更新信息';
+        document.querySelector('#release-message').textContent = '请联系服务器管理员确认当前版本。';
+      });
+  </script>
+</body>
+</html>

@@ -8,6 +8,7 @@ LOCAL_BACKUP_DIR="${ROOT_DIR}/runtime/backups/local"
 OFFLINE_BACKUP_DIR="${ROOT_DIR}/runtime/backups/offline"
 STAGING_DIR="${ROOT_DIR}/runtime/staging"
 ACCEPTED_FILE="${STAGING_DIR}/ACCEPTED_PACK_SHA256"
+RELEASE_FILE="${ROOT_DIR}/site/release.json"
 
 cd "$ROOT_DIR"
 
@@ -37,9 +38,9 @@ Mods and clients:
   mod update <name|all>        Apply a candidate update locally
   mod update-check             Check updates in a disposable copy
   mod check                    Refresh and validate the candidate pack
-  mod publish [--force]        Commit and push an accepted pack to GitHub Pages
-  client build [PACK_URL]      Build the self-updating Prism import ZIP
-  client mrpack --confirm      Export a manual snapshot after license review
+  mod publish small [--force]  Publish a manual-update release
+  mod publish full [--force]   Publish a release that requires re-importing
+  client build                 Build the current standard Modrinth .mrpack
 
 Staging:
   stage start                  Start an isolated server on 127.0.0.1:25566
@@ -124,6 +125,18 @@ refresh_and_validate_pack() {
   info "Refreshing Packwiz index"
   packwiz_run refresh
   python3 "${ROOT_DIR}/tools/validate_pack.py" "${ROOT_DIR}/pack"
+}
+
+validate_mrpack_safety() {
+  local pack_dir="$1"
+  python3 "${ROOT_DIR}/tools/release_pack.py" safety \
+    --pack-dir "$pack_dir" --approvals "$pack_dir/redistribution.toml"
+}
+
+verify_mrpack() {
+  local pack_dir="$1" mrpack="$2"
+  python3 "${ROOT_DIR}/tools/release_pack.py" verify \
+    --pack-dir "$pack_dir" --mrpack "$mrpack"
 }
 
 prune_offline_backups() {
@@ -403,8 +416,15 @@ command_mod() {
       refresh_and_validate_pack
       ;;
     publish)
-      local force=false
-      [[ "${1:-}" == "--force" ]] && force=true
+      local release_type="${1:-}" force=false
+      [[ "$release_type" == "small" || "$release_type" == "full" ]] \
+        || die "Usage: ./mcctl mod publish <small|full> [--force]"
+      shift || true
+      if [[ "${1:-}" == "--force" ]]; then
+        force=true
+        shift || true
+      fi
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl mod publish <small|full> [--force]"
       refresh_and_validate_pack
       if [[ "$force" == false ]]; then
         [[ -s "$ACCEPTED_FILE" ]] || die "No accepted staging test. Run './mcctl stage accept' or publish --force."
@@ -415,11 +435,67 @@ command_mod() {
         || die "This environment has no usable .git repository. Initialize Git before publishing."
       git -C "$ROOT_DIR" remote get-url origin >/dev/null 2>&1 \
         || die "Configure the GitHub remote named origin before publishing."
-      git -C "$ROOT_DIR" add pack
-      git -C "$ROOT_DIR" diff --cached --quiet && die "There are no Packwiz changes to publish."
-      git -C "$ROOT_DIR" commit -m "chore(pack): publish approved mod changes"
+      [[ "$(git -C "$ROOT_DIR" branch --show-current)" == "main" ]] \
+        || die "Releases must be published from the main branch."
+
+      git -C "$ROOT_DIR" diff --quiet HEAD -- . ':(exclude)pack' ':(exclude)site/release.json' \
+        || die "Commit non-pack changes before publishing; this command only commits pack/ and site/release.json."
+      local outside_untracked
+      outside_untracked="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard -- \
+        . ':(exclude)pack' ':(exclude)site/release.json')"
+      [[ -z "$outside_untracked" ]] \
+        || die "Commit or remove non-pack untracked files before publishing: ${outside_untracked//$'\n'/, }"
+
+      git -C "$ROOT_DIR" diff --quiet HEAD -- pack \
+        && die "There are no Minecraft, Fabric, or mod changes to publish."
+
+      local publish_dir release_json pack_version exported
+      publish_dir="$(candidate_pack_dir)"
+      release_json="$(mktemp /tmp/wezza-release.XXXXXX.json)"
+      if ! python3 "${ROOT_DIR}/tools/release_pack.py" prepare \
+        --pack-dir "$publish_dir" --repo-root "$ROOT_DIR" \
+        --release-type "$release_type" --output "$release_json"; then
+        rm -rf -- "$publish_dir"
+        rm -f -- "$release_json"
+        die "Release preparation failed; the real pack was not changed."
+      fi
+      if ! validate_candidate_pack "$publish_dir"; then
+        rm -rf -- "$publish_dir"
+        rm -f -- "$release_json"
+        die "Versioned release failed Packwiz validation; the real pack was not changed."
+      fi
+      if ! validate_mrpack_safety "$publish_dir"; then
+        rm -rf -- "$publish_dir"
+        rm -f -- "$release_json"
+        die "MRPACK redistribution safety failed; the real pack was not changed."
+      fi
+      pack_version="$(python3 "${ROOT_DIR}/tools/release_pack.py" version --pack-dir "$publish_dir")"
+      exported="${publish_dir}/wezza-mc-${pack_version}.mrpack"
+      if ! packwiz_run_in "$publish_dir" --yes modrinth export --output "$(basename "$exported")"; then
+        rm -rf -- "$publish_dir"
+        rm -f -- "$release_json"
+        die "MRPACK export failed; the real pack was not changed."
+      fi
+      if ! verify_mrpack "$publish_dir" "$exported"; then
+        rm -rf -- "$publish_dir"
+        rm -f -- "$release_json"
+        die "MRPACK verification failed; the real pack was not changed."
+      fi
+      rm -f -- "$exported"
+      promote_candidate_pack "$publish_dir"
+      cp "$release_json" "$RELEASE_FILE"
+      python3 "${ROOT_DIR}/tools/release_pack.py" release-check \
+        --pack-dir "${ROOT_DIR}/pack" --release "$RELEASE_FILE"
+      rm -rf -- "$publish_dir"
+      rm -f -- "$release_json"
+
+      git -C "$ROOT_DIR" add pack site/release.json
+      git -C "$ROOT_DIR" diff --cached --quiet -- pack site/release.json \
+        && die "There are no release changes to publish."
+      git -C "$ROOT_DIR" commit -m "chore(pack): publish ${pack_version} (${release_type})" \
+        -- pack site/release.json
       git -C "$ROOT_DIR" push origin HEAD
-      info "Pushed. GitHub Pages will deploy the approved manifest."
+      info "Pushed ${pack_version}. GitHub Pages will build the standard MRPACK."
       ;;
     *) die "Unknown mod action: ${action:-<missing>}" ;;
   esac
@@ -513,36 +589,38 @@ command_client() {
   local action="${1:-}"
   case "$action" in
     build)
-      load_settings
-      local pack_url="${2:-${PACKWIZ_URL:-}}"
-      [[ -n "$pack_url" ]] || die "Provide PACK_URL or set PACKWIZ_URL in .env."
-      python3 "${ROOT_DIR}/tools/build_client.py" --pack-dir "${ROOT_DIR}/pack" \
-        --pack-url "$pack_url" --output "${ROOT_DIR}/dist/wezza-mc-prism.zip"
-      ;;
-    mrpack)
-      [[ "${2:-}" == "--confirm" ]] \
-        || die "Usage: ./mcctl client mrpack --confirm (confirm every bundled mod permits redistribution)"
-      local export_dir exported
+      [[ $# -eq 1 ]] || die "Usage: ./mcctl client build"
+      local export_dir exported pack_version
       export_dir="$(candidate_pack_dir)"
       if ! validate_candidate_pack "$export_dir"; then
         rm -rf -- "$export_dir"
         die "Pack validation failed; no .mrpack was created."
       fi
-      if ! packwiz_run_in "$export_dir" modrinth export; then
+      if ! validate_mrpack_safety "$export_dir"; then
+        rm -rf -- "$export_dir"
+        die "MRPACK redistribution safety failed; no package was created."
+      fi
+      pack_version="$(python3 "${ROOT_DIR}/tools/release_pack.py" version --pack-dir "$export_dir")"
+      exported="${export_dir}/wezza-mc-${pack_version}.mrpack"
+      if ! packwiz_run_in "$export_dir" --yes modrinth export --output "$(basename "$exported")"; then
         rm -rf -- "$export_dir"
         die "Packwiz export failed; no .mrpack was created."
       fi
-      exported="$(find "$export_dir" -maxdepth 1 -type f -name '*.mrpack' -print -quit)"
-      if [[ -z "$exported" ]]; then
+      if [[ ! -f "$exported" ]]; then
         rm -rf -- "$export_dir"
         die "Packwiz did not produce an .mrpack file."
       fi
+      if ! verify_mrpack "$export_dir" "$exported"; then
+        rm -rf -- "$export_dir"
+        die "MRPACK verification failed; no package was kept."
+      fi
       mkdir -p "${ROOT_DIR}/dist"
-      cp "$exported" "${ROOT_DIR}/dist/wezza-mc-manual.mrpack"
+      cp "$exported" "${ROOT_DIR}/dist/wezza-mc-${pack_version}.mrpack"
+      cp "$exported" "${ROOT_DIR}/dist/wezza-mc-latest.mrpack"
       rm -rf -- "$export_dir"
-      info "Built dist/wezza-mc-manual.mrpack"
+      info "Built dist/wezza-mc-${pack_version}.mrpack and dist/wezza-mc-latest.mrpack"
       ;;
-    *) die "Usage: ./mcctl client build [PACK_URL] | client mrpack --confirm" ;;
+    *) die "Usage: ./mcctl client build" ;;
   esac
 }
 

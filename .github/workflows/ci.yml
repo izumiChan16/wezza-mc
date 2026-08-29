@@ -31,15 +31,22 @@ jobs:
       - name: Validate scripts and Compose
         run: |
           bash -n mcctl
-          python3 -m py_compile tools/validate_pack.py tools/build_client.py
+          python3 -m py_compile tools/validate_pack.py tools/release_pack.py
+          python3 tools/release_pack.py safety --pack-dir pack
+          python3 tools/release_pack.py release-check --pack-dir pack \
+            --release site/release.json
           cp .env.example .env
           cp secrets/aws_credentials.example secrets/aws_credentials
           printf 'ci-only\n' > secrets/rcon_password.txt
           printf 'ci-only\n' > secrets/restic_password.txt
           docker compose config --quiet
 
-      - name: Build a Prism package
-        run: >-
-          python3 tools/build_client.py
-          --pack-url https://example.github.io/wezza-mc/pack.toml
-          --output dist/wezza-mc-prism.zip
+      - name: Build and verify standard MRPACK
+        run: |
+          mkdir -p dist
+          cd pack
+          "$(go env GOPATH)/bin/packwiz" modrinth export \
+            --output ../dist/wezza-mc-ci.mrpack
+          cd ..
+          python3 tools/release_pack.py verify \
+            --pack-dir pack --mrpack dist/wezza-mc-ci.mrpack

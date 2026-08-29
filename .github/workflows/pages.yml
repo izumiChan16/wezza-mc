@@ -6,7 +6,7 @@ on:
     paths:
       - "pack/**"
       - "site/**"
-      - "tools/build_client.py"
+      - "tools/release_pack.py"
       - "tools/validate_pack.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -46,15 +46,25 @@ jobs:
         id: pages
         uses: actions/configure-pages@v5
 
-      - name: Assemble static site and Prism client
+      - name: Assemble static site and standard MRPACK
         run: |
           mkdir -p public/downloads
-          cp -a pack/. public/
-          cp site/index.html public/index.html
+          cp pack/pack.toml pack/index.toml public/
+          cp -a pack/mods public/mods
+          cp site/index.html site/updates.html site/release.json public/
           python3 tools/validate_pack.py pack --json-output public/mods.json
-          python3 tools/build_client.py \
-            --pack-url "${{ steps.pages.outputs.base_url }}/pack.toml" \
-            --output public/downloads/wezza-mc-prism.zip
+          python3 tools/release_pack.py safety --pack-dir pack
+          python3 tools/release_pack.py release-check --pack-dir pack \
+            --release site/release.json
+          PACK_VERSION="$(python3 tools/release_pack.py version --pack-dir pack)"
+          cd pack
+          "$(go env GOPATH)/bin/packwiz" modrinth export \
+            --output "../public/downloads/wezza-mc-${PACK_VERSION}.mrpack"
+          cd ..
+          cp "public/downloads/wezza-mc-${PACK_VERSION}.mrpack" \
+            public/downloads/wezza-mc-latest.mrpack
+          python3 tools/release_pack.py verify --pack-dir pack \
+            --mrpack "public/downloads/wezza-mc-${PACK_VERSION}.mrpack"
 
       - uses: actions/upload-pages-artifact@v4
         with:

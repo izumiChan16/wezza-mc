@@ -1,0 +1,9 @@
+schema = 1
+
+# Modrinth-hosted files do not need entries here. For any CurseForge or direct
+# URL file that Packwiz would bundle into the .mrpack, add an explicit approval:
+#
+# [files."mods/example.pw.toml"]
+# approved = true
+# metadata-sha256 = "sha256 of mods/example.pw.toml"
+# license-url = "https://author.example/license"

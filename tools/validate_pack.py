@@ -151,6 +151,20 @@ def validate(pack_dir: Path) -> tuple[list[dict], list[str], list[str]]:
                 "side": side,
                 "source": source,
                 "metadata": rel,
+                "download_url": download.get("url"),
+                "project_url": (
+                    f"https://modrinth.com/mod/{update['modrinth'].get('mod-id')}"
+                    if source == "modrinth" and update["modrinth"].get("mod-id")
+                    else None
+                ),
+                "version_url": (
+                    "https://modrinth.com/mod/"
+                    f"{update['modrinth'].get('mod-id')}/version/{update['modrinth'].get('version')}"
+                    if source == "modrinth"
+                    and update["modrinth"].get("mod-id")
+                    and update["modrinth"].get("version")
+                    else None
+                ),
             }
         )
 
