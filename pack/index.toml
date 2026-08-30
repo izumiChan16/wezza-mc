@@ -1,8 +1,18 @@
 hash-format = "sha256"
 
 [[files]]
+file = "mods/adventure-platform-mod.pw.toml"
+hash = "ee2c7c6b234e4e310e8a4dbbfe3de81a0fe099e99a2c22eb7a2c4622b05327a9"
+metafile = true
+
+[[files]]
 file = "mods/badoptimizations.pw.toml"
 hash = "8e6033c2642308835d119a073fdf24306394cdb6985c482a08e67b8087f6e90d"
+metafile = true
+
+[[files]]
+file = "mods/better-fabric-console.pw.toml"
+hash = "206ff590f9a55ddf46e0e0eec8fefeb8f8c0618602f153a276beb9cf75652807"
 metafile = true
 
 [[files]]

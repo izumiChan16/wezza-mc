@@ -1,31 +1,51 @@
 {
   "schema": 1,
-  "pack_version": "26.1.2-r3",
-  "previous_pack_version": "26.1.2-r2",
+  "pack_version": "26.1.2-r4",
+  "previous_pack_version": "26.1.2-r3",
   "minecraft": "26.1.2",
   "fabric_loader": "0.19.3",
-  "release_type": "small",
-  "requires_reimport": false,
-  "published_at": "2026-08-29T15:00:19+00:00",
+  "release_type": "full",
+  "requires_reimport": true,
+  "published_at": "2026-08-30T00:45:14+00:00",
   "changes": [
     {
       "action": "added",
+      "player_operation": "added",
+      "metadata": "mods/adventure-platform-mod.pw.toml",
+      "name": "adventure-platform-mod",
+      "side": "both",
+      "player_action": true,
+      "old": null,
+      "new": {
+        "name": "adventure-platform-mod",
+        "filename": "adventure-platform-fabric-6.9.0.jar",
+        "side": "both",
+        "source": "modrinth",
+        "download_url": "https://cdn.modrinth.com/data/O5VsIpQY/versions/Rvd03EvD/adventure-platform-fabric-6.9.0.jar",
+        "hash_format": "sha512",
+        "hash": "e74182238faea8be1f03c523ccd73e4b2e117c59bf9fb9b2382eb06995658b65cfc490acdcbf1eef8078829a99c048e98227c472754ca0be747fe3e06eb7b574",
+        "project_url": "https://modrinth.com/mod/O5VsIpQY",
+        "version_url": "https://modrinth.com/mod/O5VsIpQY/version/Rvd03EvD"
+      }
+    },
+    {
+      "action": "added",
       "player_operation": null,
-      "metadata": "mods/chunky.pw.toml",
-      "name": "Chunky",
+      "metadata": "mods/better-fabric-console.pw.toml",
+      "name": "Better Fabric Console",
       "side": "server",
       "player_action": false,
       "old": null,
       "new": {
-        "name": "Chunky",
-        "filename": "Chunky-Fabric-1.5.3.jar",
+        "name": "Better Fabric Console",
+        "filename": "better-fabric-console-mc26.1.2-2.0.0.jar",
         "side": "server",
         "source": "modrinth",
-        "download_url": "https://cdn.modrinth.com/data/fALzjamp/versions/4Eotm6ov/Chunky-Fabric-1.5.3.jar",
+        "download_url": "https://cdn.modrinth.com/data/Y8o1j1Sf/versions/hOTbk3bT/better-fabric-console-mc26.1.2-2.0.0.jar",
         "hash_format": "sha512",
-        "hash": "b83bfe7b218d0aa6232af977ae741dc1f82b10e50cd12bb759f65cf416b8b62beccb543e587ef0b9670abe03815660f8e091bc6823624d65cf07300571573516",
-        "project_url": "https://modrinth.com/mod/fALzjamp",
-        "version_url": "https://modrinth.com/mod/fALzjamp/version/4Eotm6ov"
+        "hash": "32b581f4a92b13a89f149c50025d21a87c4e87159daf5d1c4a099b9149c3ea630790b4e248a05f9139885a8df90b610f05cc099d9a46e2f037565c5d5c617506",
+        "project_url": "https://modrinth.com/mod/Y8o1j1Sf",
+        "version_url": "https://modrinth.com/mod/Y8o1j1Sf/version/hOTbk3bT"
       }
     }
   ]

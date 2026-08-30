@@ -1,0 +1,13 @@
+name = "Better Fabric Console"
+filename = "better-fabric-console-mc26.1.2-2.0.0.jar"
+side = "server"
+
+[download]
+url = "https://cdn.modrinth.com/data/Y8o1j1Sf/versions/hOTbk3bT/better-fabric-console-mc26.1.2-2.0.0.jar"
+hash-format = "sha512"
+hash = "32b581f4a92b13a89f149c50025d21a87c4e87159daf5d1c4a099b9149c3ea630790b4e248a05f9139885a8df90b610f05cc099d9a46e2f037565c5d5c617506"
+
+[update]
+[update.modrinth]
+mod-id = "Y8o1j1Sf"
+version = "hOTbk3bT"
