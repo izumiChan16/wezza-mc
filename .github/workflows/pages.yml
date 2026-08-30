@@ -49,8 +49,8 @@ jobs:
       - name: Assemble static site and standard MRPACK
         run: |
           mkdir -p public/downloads
-          cp pack/pack.toml pack/index.toml public/
-          cp -a pack/mods public/mods
+          cp -a pack/. public/
+          rm -f public/.packwizignore public/redistribution.toml
           cp site/index.html site/updates.html site/release.json public/
           python3 tools/validate_pack.py pack --json-output public/mods.json
           python3 tools/release_pack.py safety --pack-dir pack
