@@ -31,7 +31,8 @@ jobs:
       - name: Validate scripts and Compose
         run: |
           bash -n mcctl
-          python3 -m py_compile tools/validate_pack.py tools/release_pack.py tools/world_control.py
+          python3 -m py_compile tools/validate_pack.py tools/release_pack.py \
+            tools/world_control.py tools/staging_session.py
           python3 -m unittest discover -s tests -v
           python3 tools/release_pack.py safety --pack-dir pack
           python3 tools/release_pack.py release-check --pack-dir pack \

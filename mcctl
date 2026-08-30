@@ -9,6 +9,7 @@ OFFLINE_BACKUP_DIR="${ROOT_DIR}/runtime/backups/offline"
 STAGING_DIR="${ROOT_DIR}/runtime/staging"
 ACCEPTED_FILE="${STAGING_DIR}/ACCEPTED_PACK_SHA256"
 RELEASE_FILE="${ROOT_DIR}/site/release.json"
+STAGING_SESSION_TOOL="${ROOT_DIR}/tools/staging_session.py"
 
 cd "$ROOT_DIR"
 
@@ -65,10 +66,16 @@ Mods and clients:
   client build                 Build the current standard Modrinth .mrpack
 
 Staging:
-  stage start                  Start an isolated server on 127.0.0.1:25566
-  stage stop                   Stop the isolated server
+  stage start                  Back up once and start an isolated test session
+  stage resume                 Resume the same test session without another backup
+  stage rebuild                Rebuild it after pack changes, reusing its backup
+  stage stop                   Pause the isolated test server
   stage logs                   Follow staging logs
-  stage accept                 Mark the currently tested pack as accepted
+  stage finish --delete-backup|--keep-backup --confirm
+                               Accept, stop, and clean the completed test session
+  stage discard --confirm      End a failed test and keep its backup and pack changes
+  stage cleanup --confirm      Remove legacy staging world copies without a session
+  stage accept                 Advanced: only record the tested pack hash
 
 Backups:
   backup                       Create an online or offline local backup
@@ -260,6 +267,81 @@ collect_backup_stats() {
   )
   BACKUP_TOTAL_COUNT=$((BACKUP_LOCAL_COUNT + BACKUP_OFFLINE_COUNT))
   BACKUP_TOTAL_BYTES=$((BACKUP_LOCAL_BYTES + BACKUP_OFFLINE_BYTES))
+}
+
+list_backup_ids() {
+  {
+    find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type f \
+      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+      -printf 'local/%f\n' 2>/dev/null
+    find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
+      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+      -printf 'offline/%f\n' 2>/dev/null
+  } | sort
+}
+
+backup_id_from_path() {
+  local archive="$1"
+  case "$archive" in
+    "$LOCAL_BACKUP_DIR/"*) printf 'local/%s\n' "$(basename "$archive")" ;;
+    "$OFFLINE_BACKUP_DIR/"*) printf 'offline/%s\n' "$(basename "$archive")" ;;
+    *) return 1 ;;
+  esac
+}
+
+staging_session_load() {
+  local inspection
+  inspection="$(python3 "$STAGING_SESSION_TOOL" inspect --root "$ROOT_DIR")" || return 1
+  IFS='|' read -r SESSION_STATE SESSION_PACK_SHA SESSION_BACKUP_STATUS \
+    SESSION_BACKUP_ID SESSION_STARTED_AT <<< "$inspection"
+}
+
+staging_session_exists() {
+  staging_session_load && [[ "$SESSION_STATE" == "active" ]]
+}
+
+staging_usage_load() {
+  local usage
+  usage="$(python3 "$STAGING_SESSION_TOOL" usage --root "$ROOT_DIR")" || return 1
+  IFS='|' read -r STAGING_DATASET_COUNT STAGING_DATA_BYTES <<< "$usage"
+}
+
+staging_has_legacy_data() {
+  staging_session_exists && return 1
+  staging_usage_load || return 1
+  (( STAGING_DATASET_COUNT > 0 ))
+}
+
+staging_session_record() {
+  local pack_sha="$1" backup_status="$2" backup_id="${3:-}"
+  local -a args=(record --root "$ROOT_DIR" --pack-sha "$pack_sha" \
+    --backup-status "$backup_status")
+  [[ -n "$backup_id" ]] && args+=(--backup-id "$backup_id")
+  python3 "$STAGING_SESSION_TOOL" "${args[@]}"
+}
+
+restore_staging_session_data() {
+  staging_session_load || die "Could not read the staging session."
+  mkdir -p "${STAGING_DIR}/data"
+  if [[ "$SESSION_BACKUP_STATUS" == "none" || -z "$SESSION_BACKUP_ID" ]]; then
+    info "No staging backup is associated with this session; using an empty world"
+    return 0
+  fi
+  local archive
+  archive="$(resolve_backup "$SESSION_BACKUP_ID")"
+  info "Restoring $SESSION_BACKUP_ID into isolated staging data"
+  tar -xf "$archive" -C "${STAGING_DIR}/data"
+}
+
+validate_staging_session_backup() {
+  staging_session_load || die "Could not read the staging session."
+  if [[ "$SESSION_BACKUP_STATUS" == "none" || -z "$SESSION_BACKUP_ID" ]]; then
+    return 0
+  fi
+  local archive
+  archive="$(resolve_backup "$SESSION_BACKUP_ID")"
+  tar -tf "$archive" >/dev/null \
+    || die "The staging backup cannot be read: $SESSION_BACKUP_ID"
 }
 
 resolve_backup() {
@@ -664,7 +746,8 @@ command_mod() {
       [[ $# -eq 0 ]] || die "Usage: ./mcctl mod publish <small|full> [--force]"
       refresh_and_validate_pack
       if [[ "$force" == false ]]; then
-        [[ -s "$ACCEPTED_FILE" ]] || die "No accepted staging test. Run './mcctl stage accept' or publish --force."
+        [[ -s "$ACCEPTED_FILE" ]] \
+          || die "No accepted staging test. Finish testing from the mcctl maintenance task or use publish --force."
         [[ "$(cat "$ACCEPTED_FILE")" == "$(pack_sha256)" ]] \
           || die "Pack changed after staging acceptance; test and accept it again."
       fi
@@ -741,50 +824,166 @@ command_mod() {
 command_stage() {
   local action="${1:-start}"
   (( $# == 0 )) || shift
-  [[ $# -eq 0 ]] || die "Usage: ./mcctl stage start|stop|logs|accept"
   load_settings
   ensure_initialized
   docker_ready
   case "$action" in
     start)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl stage start"
+      staging_session_exists \
+        && die "A staging session already exists. Resume, finish, or discard it first."
+      staging_has_legacy_data \
+        && die "Legacy staging data exists. Run './mcctl stage cleanup --confirm' first."
+      service_running minecraft-staging \
+        && die "Staging is already running without a session; stop and clean it first."
       refresh_and_validate_pack
+      local before_inventory after_inventory backup_expected=false
+      before_inventory="$(mktemp /tmp/wezza-stage-before.XXXXXX)"
+      after_inventory="$(mktemp /tmp/wezza-stage-after.XXXXXX)"
+      list_backup_ids > "$before_inventory"
       if service_running minecraft; then
+        backup_expected=true
         run_local_backup
       elif [[ -n "$(find "$DATA_DIR" -mindepth 1 -print -quit)" ]]; then
+        backup_expected=true
         offline_snapshot
       fi
+      list_backup_ids > "$after_inventory"
+      local -a new_backups=()
+      mapfile -t new_backups < <(comm -13 "$before_inventory" "$after_inventory")
+      rm -f -- "$before_inventory" "$after_inventory"
 
-      local previous archive
-      if [[ -d "${STAGING_DIR}/data" && -n "$(find "${STAGING_DIR}/data" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-        previous="${STAGING_DIR}/data.previous.$(date '+%Y%m%d-%H%M%S')"
-        mv "${STAGING_DIR}/data" "$previous"
+      local backup_status=none backup_id="" archive=""
+      if [[ "$backup_expected" == true && ${#new_backups[@]} -eq 1 ]]; then
+        backup_status=tracked
+        backup_id="${new_backups[0]}"
+      elif [[ "$backup_expected" == true ]]; then
+        backup_status=untracked
+        archive="$(latest_backup || true)"
+        [[ -n "$archive" ]] && backup_id="$(backup_id_from_path "$archive" || true)"
       fi
-      mkdir -p "${STAGING_DIR}/data"
-      archive="$(latest_backup || true)"
-      if [[ -n "$archive" ]]; then
-        info "Restoring $(basename "$archive") into isolated staging data"
-        tar -xf "$archive" -C "${STAGING_DIR}/data"
-      else
-        info "No backup exists; staging will use a new empty world"
-      fi
+      staging_session_record "$(pack_sha256)" "$backup_status" "$backup_id"
+      restore_staging_session_data
       rm -f -- "$ACCEPTED_FILE"
       compose --profile staging up -d pack-server minecraft-staging
-      info "Staging started at 127.0.0.1:${STAGING_PORT:-25566}; inspect logs before acceptance."
+      info "Staging session started at 127.0.0.1:${STAGING_PORT:-25566}."
+      if [[ "$backup_status" == tracked ]]; then
+        info "Tracked test backup: $backup_id"
+      elif [[ "$backup_status" == untracked ]]; then
+        warn "The test backup could not be uniquely identified and will never be auto-deleted."
+      fi
+      ;;
+    resume)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl stage resume"
+      staging_session_exists || die "There is no staging session to resume."
+      [[ "$SESSION_PACK_SHA" == "$(pack_sha256)" ]] \
+        || die "Pack changed during testing. Run './mcctl stage rebuild'."
+      [[ -d "${STAGING_DIR}/data" ]] \
+        || die "Staging data is missing. Run './mcctl stage rebuild'."
+      compose --profile staging up -d pack-server minecraft-staging
+      info "Resumed the existing staging session without creating another backup."
+      ;;
+    rebuild)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl stage rebuild"
+      staging_session_exists || die "There is no staging session to rebuild."
+      refresh_and_validate_pack
+      validate_staging_session_backup
+      compose --profile staging stop -t 120 minecraft-staging pack-server
+      python3 "$STAGING_SESSION_TOOL" cleanup-data --root "$ROOT_DIR"
+      restore_staging_session_data
+      local rebuilt_sha
+      rebuilt_sha="$(pack_sha256)"
+      python3 "$STAGING_SESSION_TOOL" update-pack --root "$ROOT_DIR" --pack-sha "$rebuilt_sha"
+      rm -f -- "$ACCEPTED_FILE"
+      compose --profile staging up -d pack-server minecraft-staging
+      info "Rebuilt staging from the original session backup without creating a new backup."
       ;;
     stop)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl stage stop"
       compose --profile staging stop -t 120 minecraft-staging pack-server
       ;;
     logs)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl stage logs"
       compose --profile staging logs -f minecraft-staging
       ;;
     accept)
+      [[ $# -eq 0 ]] || die "Usage: ./mcctl stage accept"
       service_running minecraft-staging || die "Staging is not running."
       local staging_id staging_health
       staging_id="$(compose --profile staging ps -q minecraft-staging)"
       staging_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$staging_id")"
       [[ "$staging_health" == "healthy" ]] || die "Staging is not healthy: $staging_health"
+      if staging_session_exists; then
+        [[ "$SESSION_PACK_SHA" == "$(pack_sha256)" ]] \
+          || die "Pack changed during testing. Rebuild staging before acceptance."
+      fi
       pack_sha256 > "$ACCEPTED_FILE"
       info "Accepted the currently tested Packwiz revision."
+      ;;
+    finish)
+      local delete_mode="" confirmed=false option
+      while (( $# > 0 )); do
+        option="$1"
+        shift
+        case "$option" in
+          --delete-backup) [[ -z "$delete_mode" ]] || die "Choose one backup policy."; delete_mode=delete ;;
+          --keep-backup) [[ -z "$delete_mode" ]] || die "Choose one backup policy."; delete_mode=keep ;;
+          --confirm) confirmed=true ;;
+          *) die "Usage: ./mcctl stage finish --delete-backup|--keep-backup --confirm" ;;
+        esac
+      done
+      [[ -n "$delete_mode" && "$confirmed" == true ]] \
+        || die "Usage: ./mcctl stage finish --delete-backup|--keep-backup --confirm"
+      staging_session_exists || die "There is no staging session to finish."
+      [[ "$SESSION_PACK_SHA" == "$(pack_sha256)" ]] \
+        || die "Pack changed during testing. Rebuild staging before finishing."
+      service_running minecraft-staging || die "Staging is not running."
+      local finish_id finish_health delete_output delete_status=0
+      finish_id="$(compose --profile staging ps -q minecraft-staging)"
+      finish_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$finish_id")"
+      [[ "$finish_health" == "healthy" ]] || die "Staging is not healthy: $finish_health"
+      pack_sha256 > "$ACCEPTED_FILE"
+      compose --profile staging stop -t 120 minecraft-staging pack-server
+      python3 "$STAGING_SESSION_TOOL" cleanup-data --root "$ROOT_DIR"
+      if [[ "$delete_mode" == delete ]]; then
+        if delete_output="$(python3 "$STAGING_SESSION_TOOL" delete-backup --root "$ROOT_DIR")"; then
+          [[ -n "$delete_output" ]] && info "$delete_output"
+        else
+          delete_status=$?
+          [[ -n "$delete_output" ]] && warn "$delete_output"
+          warn "The staging-specific backup was kept because safe deletion could not be verified."
+        fi
+      else
+        if [[ -n "$SESSION_BACKUP_ID" ]]; then
+          info "Kept the staging-specific backup: $SESSION_BACKUP_ID"
+        else
+          info "This staging session did not create a backup."
+        fi
+      fi
+      python3 "$STAGING_SESSION_TOOL" clear --root "$ROOT_DIR"
+      info "Accepted the pack, stopped staging, and cleaned all staging world copies."
+      (( delete_status == 0 || delete_status == 2 )) || return "$delete_status"
+      ;;
+    discard)
+      [[ $# -eq 1 && "$1" == "--confirm" ]] \
+        || die "Usage: ./mcctl stage discard --confirm"
+      staging_session_exists || die "There is no staging session to discard."
+      local kept_backup="$SESSION_BACKUP_ID"
+      compose --profile staging stop -t 120 minecraft-staging pack-server
+      python3 "$STAGING_SESSION_TOOL" cleanup-data --root "$ROOT_DIR"
+      rm -f -- "$ACCEPTED_FILE"
+      python3 "$STAGING_SESSION_TOOL" clear --root "$ROOT_DIR"
+      info "Discarded staging data and kept candidate pack changes."
+      [[ -z "$kept_backup" ]] || info "Kept the test backup: $kept_backup"
+      ;;
+    cleanup)
+      [[ $# -eq 1 && "$1" == "--confirm" ]] \
+        || die "Usage: ./mcctl stage cleanup --confirm"
+      staging_session_exists \
+        && die "An active staging session exists. Finish or discard it instead."
+      compose --profile staging stop -t 120 minecraft-staging pack-server
+      python3 "$STAGING_SESSION_TOOL" cleanup-data --root "$ROOT_DIR"
+      info "Cleaned legacy staging world copies; acceptance records were preserved."
       ;;
     *) die "Unknown stage action: $action" ;;
   esac
@@ -927,6 +1126,7 @@ command_client() {
 
 MENU_PLAIN=false
 MENU_FZF=false
+MENU_NOTICE=""
 
 menu_clear() {
   if [[ -t 1 && -n "${TERM:-}" && "${TERM:-dumb}" != "dumb" ]]; then
@@ -1008,6 +1208,19 @@ confirm_yes() {
   done
 }
 
+confirm_default_yes() {
+  local prompt="$1" answer
+  while true; do
+    printf '%s [Y/n]：' "$prompt" >&2
+    IFS= read -r answer || return 0
+    case "$answer" in
+      y|Y|"") return 0 ;;
+      n|N) return 1 ;;
+      *) warn "请输入 Y 或 N；直接按 Enter 默认为 Y。" ;;
+    esac
+  done
+}
+
 confirm_phrase() {
   local phrase="$1" answer
   printf '请输入完整确认短语 "%s"：' "$phrase" >&2
@@ -1016,9 +1229,13 @@ confirm_phrase() {
 }
 
 run_menu_command() {
-  local title="$1"
+  local pause_on_success=false
+  if [[ "${1:-}" == "--read" ]]; then
+    pause_on_success=true
+    shift
+  fi
+  local title="$1" status
   shift
-  local status
   menu_clear
   printf '=== %s ===\n\n' "$title"
   trap '' INT
@@ -1035,12 +1252,25 @@ run_menu_command() {
   fi
   trap - INT
   MENU_LAST_STATUS="$status"
-  [[ "$status" -eq 130 ]] || menu_pause
+  if [[ "$status" -eq 0 && "$pause_on_success" == false ]]; then
+    MENU_NOTICE="✓ $title 完成"
+  elif [[ "$status" -ne 130 ]]; then
+    menu_pause
+  fi
   return 0
 }
 
+menu_prepare_title() {
+  local target_variable="$1" base_title="$2" title
+  title="$base_title"
+  if [[ -n "$MENU_NOTICE" ]]; then
+    title="$base_title · $MENU_NOTICE"
+    MENU_NOTICE=""
+  fi
+  printf -v "$target_variable" '%s' "$title"
+}
+
 dashboard_collect() {
-  DASH_INITIALIZED=false
   DASH_CONFIG="missing"
   DASH_DOCKER="unavailable"
   DASH_PRODUCTION="unknown"
@@ -1048,15 +1278,17 @@ dashboard_collect() {
   DASH_PACK_VERSION="unknown"
   DASH_PACK_DIRTY=false
   DASH_PACK_ACCEPTED=false
-  DASH_LATEST_BACKUP="none"
   DASH_BACKUP_USAGE="0 个 · 0 B"
-  DASH_REMOTE_BACKUP="disabled"
+  DASH_STAGING_USAGE="0 B"
+  DASH_STAGING_DATASETS=0
+  DASH_SESSION_STATE="none"
+  DASH_SESSION_PACK_SHA=""
+  DASH_SESSION_BACKUP_STATUS=""
+  DASH_SESSION_BACKUP_ID=""
+  DASH_WORKFLOW="无待处理变更"
   DASH_PRODUCTION_ADDRESS="${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
-  DASH_RECOMMENDED_ID="doctor"
-  DASH_RECOMMENDED_LABEL="运行环境诊断"
 
   if [[ -f "${ROOT_DIR}/.env" ]]; then
-    DASH_INITIALIZED=true
     if load_settings; then
       DASH_PRODUCTION_ADDRESS="${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
       if validate_world_config >/dev/null 2>&1 \
@@ -1074,7 +1306,6 @@ dashboard_collect() {
       else
         DASH_CONFIG="needs attention"
       fi
-      [[ "${ENABLE_REMOTE_BACKUP:-false}" == "true" ]] && DASH_REMOTE_BACKUP="enabled"
     else
       DASH_CONFIG="invalid shell syntax"
     fi
@@ -1112,54 +1343,55 @@ dashboard_collect() {
     [[ -n "$(git -C "$ROOT_DIR" status --porcelain=v1 -- pack 2>/dev/null || true)" ]] \
       && DASH_PACK_DIRTY=true
   fi
-  if [[ -s "$ACCEPTED_FILE" ]]; then
-    local accepted_hash current_hash
-    accepted_hash="$(<"$ACCEPTED_FILE")"
+  local current_hash=""
+  if [[ -d "${ROOT_DIR}/pack" ]]; then
     current_hash="$(pack_sha256 2>/dev/null || true)"
+  fi
+  if [[ -s "$ACCEPTED_FILE" ]]; then
+    local accepted_hash
+    accepted_hash="$(<"$ACCEPTED_FILE")"
     [[ -n "$current_hash" && "$accepted_hash" == "$current_hash" ]] && DASH_PACK_ACCEPTED=true
   fi
 
-  local backup
-  backup="$(latest_backup 2>/dev/null || true)"
-  if [[ -n "$backup" ]]; then
-    DASH_LATEST_BACKUP="$(date -r "$backup" '+%Y-%m-%d %H:%M' 2>/dev/null || printf 'unknown') · $(basename "$backup")"
+  if [[ -f "$STAGING_SESSION_TOOL" ]]; then
+    if staging_session_load; then
+      DASH_SESSION_STATE="$SESSION_STATE"
+      DASH_SESSION_PACK_SHA="$SESSION_PACK_SHA"
+      DASH_SESSION_BACKUP_STATUS="$SESSION_BACKUP_STATUS"
+      DASH_SESSION_BACKUP_ID="$SESSION_BACKUP_ID"
+    fi
+    if staging_usage_load; then
+      DASH_STAGING_DATASETS="$STAGING_DATASET_COUNT"
+      DASH_STAGING_USAGE="$(format_bytes "$STAGING_DATA_BYTES")"
+    fi
   fi
+
   collect_backup_stats
   DASH_BACKUP_USAGE="${BACKUP_TOTAL_COUNT} 个 · $(format_bytes "$BACKUP_TOTAL_BYTES")"
 
-  if [[ "$DASH_INITIALIZED" == false || "$DASH_CONFIG" != "ready" ]]; then
-    DASH_RECOMMENDED_ID="setup"
-    DASH_RECOMMENDED_LABEL="完成初始化与本机配置"
-  elif [[ "$DASH_DOCKER" != "ready" ]]; then
-    DASH_RECOMMENDED_ID="doctor"
-    DASH_RECOMMENDED_LABEL="启动 Docker Desktop 或运行诊断"
-  elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == false \
-    && ( "$DASH_STAGING" == "running" || "$DASH_STAGING" == "healthy" ) ]]; then
-    DASH_RECOMMENDED_ID="stage_accept"
-    DASH_RECOMMENDED_LABEL="接受已经测试的候选整合包"
-  elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == false \
-    && ( "$DASH_STAGING" == "starting" || "$DASH_STAGING" == "unhealthy" ) ]]; then
-    DASH_RECOMMENDED_ID="stage_logs"
-    DASH_RECOMMENDED_LABEL="查看测试服日志并等待其恢复健康"
-  elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == false ]]; then
-    DASH_RECOMMENDED_ID="stage_start"
-    DASH_RECOMMENDED_LABEL="启动测试服验证整合包变更"
+  if [[ "$DASH_SESSION_STATE" == "active" ]]; then
+    if [[ -z "$current_hash" || "$DASH_SESSION_PACK_SHA" != "$current_hash" ]]; then
+      DASH_WORKFLOW="测试内容已变化，需重建"
+    elif [[ "$DASH_STAGING" == "healthy" ]]; then
+      DASH_WORKFLOW="测试中，可以验收"
+    elif [[ "$DASH_STAGING" == "running" || "$DASH_STAGING" == "starting" \
+      || "$DASH_STAGING" == "unhealthy" ]]; then
+      DASH_WORKFLOW="测试服启动中或需检查"
+    else
+      DASH_WORKFLOW="测试已暂停"
+    fi
+  elif (( DASH_STAGING_DATASETS > 0 )); then
+    DASH_WORKFLOW="旧测试数据待清理"
   elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == true ]]; then
-    DASH_RECOMMENDED_ID="publish"
-    DASH_RECOMMENDED_LABEL="发布已接受的整合包变更"
-  elif [[ "$DASH_PRODUCTION" == "stopped" ]]; then
-    DASH_RECOMMENDED_ID="start"
-    DASH_RECOMMENDED_LABEL="启动正式服务器"
-  else
-    DASH_RECOMMENDED_ID="server_status"
-    DASH_RECOMMENDED_LABEL="查看正式服务器详情"
+    DASH_WORKFLOW="已测试，待发布"
+  elif [[ "$DASH_PACK_DIRTY" == true ]]; then
+    DASH_WORKFLOW="有候选变更，待测试"
   fi
+
 }
 
 dashboard_render() {
-  local pack_state="无候选变更" config_state docker_state production_state staging_state remote_state latest_backup
-  [[ "$DASH_PACK_DIRTY" == true ]] && pack_state="有待测试的候选变更"
-  [[ "$DASH_PACK_ACCEPTED" == true ]] && pack_state="候选变更已接受"
+  local config_state docker_state production_state staging_state notice=""
   case "$DASH_CONFIG" in
     ready) config_state="就绪" ;;
     missing) config_state="缺少 .env" ;;
@@ -1179,24 +1411,22 @@ dashboard_render() {
     starting) staging_state="启动中" ;; unhealthy) staging_state="不健康" ;;
     stopped) staging_state="已停止" ;; *) staging_state="未知" ;;
   esac
-  case "$DASH_REMOTE_BACKUP" in enabled) remote_state="已启用" ;; *) remote_state="未启用" ;; esac
-  latest_backup="$DASH_LATEST_BACKUP"
-  [[ "$latest_backup" == "none" ]] && latest_backup="暂无"
+  if [[ -n "$MENU_NOTICE" ]]; then
+    notice="$MENU_NOTICE"
+    MENU_NOTICE=""
+  fi
   menu_clear
   cat <<EOF
 Wezza MC 管理面板
 ────────────────────────────────────────────────────────────
-本机配置      $config_state
-Docker        $docker_state
 正式服务器    $production_state · $DASH_PRODUCTION_ADDRESS
-测试服务器    $staging_state
-整合包        $DASH_PACK_VERSION · $pack_state
-最新备份      $latest_backup
+整合包维护    $DASH_PACK_VERSION · $DASH_WORKFLOW
 本机备份      $DASH_BACKUP_USAGE
-远端备份      $remote_state
+测试服数据    $DASH_STAGING_DATASETS 份 · $DASH_STAGING_USAGE · 服务$staging_state
+运行环境      配置$config_state · Docker$docker_state
 ────────────────────────────────────────────────────────────
-建议操作      $DASH_RECOMMENDED_LABEL
 EOF
+  [[ -z "$notice" ]] || printf '%s\n' "$notice"
 }
 
 doctor_item() {
@@ -1391,60 +1621,11 @@ menu_edit_env() {
   info "已保存 .env 并校验世界设置；可运行 doctor 完成全部检查。"
 }
 
-menu_server() {
-  local selected command_text
-  while true; do
-    selected="$(menu_select '正式服务器' \
-      $'start\t启动服务器\t创建停服快照后启动正式服' \
-      $'stop\t安全关服\t通知玩家、保存、备份后停止' \
-      $'stop_skip\t关服并跳过远端备份\t仍会创建必要的本机备份' \
-      $'restart\t安全重启\t完整关服后重新启动' \
-      $'status\t详细状态\t显示 Compose 服务和本机地址' \
-      $'logs\t跟随日志\tCtrl-C 只退出日志，不会停止服务器' \
-      $'console\t连接控制台\t使用 Ctrl-P、Ctrl-Q 依次分离' \
-      $'rcon\t执行 Minecraft 命令\t通过内部 RCON 发送一条命令' \
-      $'__back\t返回\t返回状态总览')"
-    case "$selected" in
-    start)
-      if confirm_yes "要启动正式服务器吗？"; then
-        run_menu_command "启动正式服务器" command_start
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    stop)
-      if confirm_yes "要通知玩家、保存、备份并停止正式服吗？"; then
-        run_menu_command "安全停止正式服务器" command_stop
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    stop_skip)
-      if confirm_yes "要停止正式服并仅跳过远端备份吗？"; then
-        run_menu_command "跳过远端备份并关服" command_stop --skip-remote
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    restart)
-      if confirm_yes "要安全停止并重启正式服吗？"; then
-        run_menu_command "重启正式服务器" command_restart
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    status) run_menu_command "正式服务器详情" command_status ;;
-    logs) run_menu_command "正式服务器日志" command_production_logs ;;
-    console) run_menu_command "正式服务器控制台" command_console ;;
-    rcon)
-      command_text="$(prompt_value 'Minecraft 命令（不要输入 /）：')" || { menu_cancelled; continue; }
-      run_menu_command "RCON: $command_text" run_rcon_command "$command_text"
-      ;;
-    __back) return 0 ;;
-    esac
-  done
-}
-
 menu_players() {
-  local selected player
+  local selected player menu_title
   while true; do
-    selected="$(menu_select '玩家与权限' \
+    menu_prepare_title menu_title '玩家与权限'
+    selected="$(menu_select "$menu_title" \
       $'online\t查看在线玩家\t查询正式服务器' \
       $'whitelist_list\t查看白名单\t列出允许加入的 Java 版玩家' \
       $'whitelist_add\t加入白名单\t允许一名玩家加入' \
@@ -1453,8 +1634,8 @@ menu_players() {
       $'deop\t撤销 OP\t移除 Minecraft 管理员权限' \
       $'__back\t返回\t返回状态总览')"
     case "$selected" in
-    online) run_menu_command "在线玩家" run_rcon_command list ;;
-    whitelist_list) run_menu_command "白名单" run_whitelist_command list ;;
+    online) run_menu_command --read "在线玩家" run_rcon_command list ;;
+    whitelist_list) run_menu_command --read "白名单" run_whitelist_command list ;;
     whitelist_add|whitelist_remove|op|deop)
       player="$(prompt_player)" || { menu_cancelled; continue; }
       case "$selected" in
@@ -1482,9 +1663,10 @@ menu_players() {
 }
 
 menu_mods() {
-  local selected source slug side
+  local selected source slug side menu_title
   while true; do
-    selected="$(menu_select '模组与客户端整合包' \
+    menu_prepare_title menu_title '修改候选整合包'
+    selected="$(menu_select "$menu_title" \
       $'list\t列出模组\t显示 slug、安装侧、来源和名称' \
       $'add\t添加模组\t使用 Modrinth slug、CurseForge 或 HTTPS URL' \
       $'update_check\t检查更新\t在临时整合包副本中比较' \
@@ -1496,19 +1678,15 @@ menu_mods() {
       $'client_build\t构建客户端包\t创建并验证当前 .mrpack' \
       $'__back\t返回\t返回状态总览')"
     case "$selected" in
-    list) run_menu_command "当前模组" command_mod list ;;
+    list) run_menu_command --read "当前模组" command_mod list ;;
     add)
       source="$(prompt_value 'Modrinth slug 或模组 URL：')" || { menu_cancelled; continue; }
-      if confirm_yes "要将 '$source' 添加为本地候选吗？"; then
-        run_menu_command "添加候选模组" command_mod add "$source"
-      else menu_cancelled; fi
+      run_menu_command "添加候选模组" command_mod add "$source"
       ;;
-    update_check) run_menu_command "检查模组更新" command_mod update-check ;;
+    update_check) run_menu_command --read "检查模组更新" command_mod update-check ;;
     update_one)
       slug="$(select_mod_slug)" || { menu_cancelled; continue; }
-      if confirm_yes "要把 $slug 更新为本地候选吗？"; then
-        run_menu_command "更新 $slug" command_mod update "$slug"
-      else menu_cancelled; fi
+      run_menu_command "更新 $slug" command_mod update "$slug"
       ;;
     update_all)
       if confirm_yes "要更新所有存在有效候选版本的模组吗？"; then
@@ -1523,9 +1701,7 @@ menu_mods() {
         $'both\t客户端与服务端\t双方都安装' \
         $'__back\t返回\t取消操作')"
       [[ "$side" != "__back" ]] || continue
-      if confirm_yes "要将 $slug 的安装侧设为 $side 吗？"; then
-        run_menu_command "修改 $slug 安装侧" command_mod side "$slug" "$side"
-      else menu_cancelled; fi
+      run_menu_command "修改 $slug 安装侧" command_mod side "$slug" "$side"
       ;;
     remove)
       slug="$(select_mod_slug)" || { menu_cancelled; continue; }
@@ -1540,55 +1716,12 @@ menu_mods() {
   done
 }
 
-menu_release() {
-  local selected release_type
-  while true; do
-    selected="$(menu_select '测试服与发布' \
-      $'stage_start\t启动全新测试服\t备份正式服并恢复副本用于测试' \
-      $'stage_logs\t跟随测试服日志\t检查启动和模组行为' \
-      $'stage_accept\t接受已测试整合包\t记录健康测试服对应的清单哈希' \
-      $'stage_stop\t停止测试服\t停止隔离服务器和清单服务' \
-      $'publish_small\t发布小更新\t现有玩家按照更新说明手工操作' \
-      $'publish_full\t发布完整更新\t玩家需要重新导入客户端整合包' \
-      $'__back\t返回\t返回状态总览')"
-    case "$selected" in
-    stage_start)
-      if confirm_yes "要从最新正式服备份创建全新测试副本吗？"; then
-        run_menu_command "启动测试服" command_stage start
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    stage_logs) run_menu_command "测试服日志" command_stage logs ;;
-    stage_accept)
-      if confirm_yes "确认你已经测试当前健康的测试服吗？"; then
-        run_menu_command "接受测试服整合包" command_stage accept
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    stage_stop)
-      if confirm_yes "要停止隔离测试服务吗？"; then
-        run_menu_command "停止测试服" command_stage stop
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    publish_small|publish_full)
-      release_type="${selected#publish_}"
-      printf '\n此操作会从 main 发布、提交整合包与发布元数据，并推送到 origin。\n' >&2
-      if confirm_phrase "PUBLISH $release_type"; then
-        run_menu_command "发布 $release_type 更新" command_mod publish "$release_type"
-        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
-      else menu_cancelled; fi
-      ;;
-    __back) return 0 ;;
-    esac
-  done
-}
-
 menu_world_backup() {
   local selected mode seed world_name backup_id phrase menu_title
   while true; do
     collect_backup_stats
     menu_title="世界与备份 · local ${BACKUP_LOCAL_COUNT} 个/$(format_bytes "$BACKUP_LOCAL_BYTES") · offline ${BACKUP_OFFLINE_COUNT} 个/$(format_bytes "$BACKUP_OFFLINE_BYTES") · 总计 $(format_bytes "$BACKUP_TOTAL_BYTES")"
+    menu_prepare_title menu_title "$menu_title"
     selected="$(menu_select "$menu_title" \
       $'world_status\t世界状态\t显示路径、大小、种子设置和归档' \
       $'world_reset\t重置世界\t归档当前世界并配置新种子' \
@@ -1599,7 +1732,7 @@ menu_world_backup() {
       $'backup_delete\t删除备份\t使用 Y/N 确认并永久删除一个本机归档' \
       $'__back\t返回\t返回状态总览')"
     case "$selected" in
-    world_status) run_menu_command "世界状态" command_world status ;;
+    world_status) run_menu_command --read "世界状态" command_world status ;;
     world_reset)
       mode="$(menu_select '选择下一个世界的种子' \
         $'random\t随机种子\t清空 WORLD_SEED 以随机生成' \
@@ -1630,10 +1763,10 @@ menu_world_backup() {
       [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
       ;;
     backup_create) run_menu_command "创建备份" command_backup ;;
-    backup_list) run_menu_command "本机备份归档" command_backup_list ;;
+    backup_list) run_menu_command --read "本机备份归档" command_backup_list ;;
     restore_test)
       backup_id="$(select_backup_id)" || continue
-      run_menu_command "测试恢复 $backup_id" command_restore_test "$backup_id"
+      run_menu_command --read "测试恢复 $backup_id" command_restore_test "$backup_id"
       ;;
     restore)
       backup_id="$(select_backup_id)" || continue
@@ -1655,48 +1788,191 @@ menu_world_backup() {
   done
 }
 
-menu_settings() {
-  local selected
+menu_publish_handoff() {
+  local selected release_type menu_title
   while true; do
-    selected="$(menu_select '设置与诊断' \
-      $'init\t初始化本机文件\t创建缺少的 .env、密钥和 runtime 目录' \
-      $'edit\t编辑 .env\t使用 VISUAL、EDITOR 或 nano，保存后校验' \
-      $'doctor\t运行诊断\t检查依赖、设置、密钥、Docker 和发布元数据' \
-      $'help\t完整命令参考\t显示高级非交互命令' \
-      $'__back\t返回\t返回状态总览')"
+    menu_prepare_title menu_title '下一步：发布已测试的整合包'
+    selected="$(menu_select "$menu_title" \
+      $'small\t发布小更新\t玩家按照更新说明手工更新' \
+      $'full\t发布完整更新\t玩家需要重新导入客户端整合包' \
+      $'later\t稍后发布\t保留验收记录，回到主菜单')"
     case "$selected" in
-    init) run_menu_command "初始化本机文件" command_init ;;
-    edit) run_menu_command "编辑本机配置" menu_edit_env ;;
-    doctor) run_menu_command "环境诊断" command_doctor ;;
-    help) run_menu_command "高级命令参考" usage_all ;;
-    __back) return 0 ;;
+      small|full)
+        release_type="$selected"
+        printf '\n发布会提交整合包与发布元数据，并推送到 origin。\n' >&2
+        if confirm_yes "现在发布 $release_type 更新吗？"; then
+          run_menu_command "发布 $release_type 更新" command_mod publish "$release_type"
+          [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        else
+          menu_cancelled
+        fi
+        ;;
+      later|__back)
+        MENU_NOTICE="已完成测试；发布已留到稍后"
+        return 0
+        ;;
     esac
   done
 }
 
-menu_recommended() {
-  case "$DASH_RECOMMENDED_ID" in
-    setup) run_menu_command "初始化并编辑本机配置" menu_edit_env ;;
-    doctor) run_menu_command "环境诊断" command_doctor ;;
-    start)
-      if confirm_yes "要启动正式服务器吗？"; then
-        run_menu_command "启动正式服务器" command_start
-      else menu_cancelled; fi
-      ;;
-    server_status) run_menu_command "正式服务器详情" command_status ;;
-    stage_start)
-      if confirm_yes "要为候选整合包创建全新测试副本吗？"; then
-        run_menu_command "启动测试服" command_stage start
-      else menu_cancelled; fi
-      ;;
-    stage_accept)
-      if confirm_yes "确认当前健康的测试服已经过测试吗？"; then
-        run_menu_command "接受测试服整合包" command_stage accept
-      else menu_cancelled; fi
-      ;;
-    stage_logs) run_menu_command "测试服日志" command_stage logs ;;
-    publish) menu_release ;;
-  esac
+menu_pack_workflow() {
+  local selected menu_title current_sha delete_option
+  local -a entries=()
+  while true; do
+    dashboard_collect
+    entries=()
+    menu_title="整合包维护 · $DASH_WORKFLOW"
+    menu_prepare_title menu_title "$menu_title"
+
+    if [[ "$DASH_SESSION_STATE" == "active" ]]; then
+      current_sha="$(pack_sha256 2>/dev/null || true)"
+      if [[ -z "$current_sha" || "$DASH_SESSION_PACK_SHA" != "$current_sha" ]]; then
+        entries+=(
+          $'rebuild\t用最新变更重建测试服\t沿用本次备份，不再重复备份正式服'
+        )
+      elif [[ "$DASH_STAGING" == "healthy" ]]; then
+        entries+=(
+          $'finish\t测试没有问题：完成并清理\t接受当前整合包、停止测试服并删除测试副本'
+        )
+      elif [[ "$DASH_STAGING" == "stopped" || "$DASH_STAGING" == "unknown" ]]; then
+        entries+=(
+          $'resume\t继续这次测试\t沿用测试副本和备份，不创建新备份'
+        )
+      fi
+      if [[ "$DASH_STAGING" != "stopped" && "$DASH_STAGING" != "unknown" ]]; then
+        entries+=(
+          $'logs\t查看测试服日志\tCtrl-C 只退出日志'
+          $'pause\t暂时停止测试服\t保留会话，之后可以继续'
+        )
+      fi
+      entries+=(
+        $'failed\t测试有问题：结束本次测试\t清理测试副本；保留备份和候选变更'
+        $'changes\t继续修改候选整合包\t添加、更新、移除或校验模组'
+      )
+    else
+      if (( DASH_STAGING_DATASETS > 0 )); then
+        entries+=(
+          "cleanup_legacy"$'\t'"清理旧测试数据（$DASH_STAGING_USAGE）"$'\t'"只删除 runtime/staging 中的世界副本"
+        )
+      elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == true ]]; then
+        entries+=(
+          $'publish\t发布已测试的变更\t选择小更新、完整更新或稍后处理'
+          $'start\t重新测试当前整合包\t新建一次隔离测试会话'
+        )
+      elif [[ "$DASH_PACK_DIRTY" == true ]]; then
+        entries+=(
+          $'start\t开始测试候选整合包\t只在开始时为正式服备份一次'
+        )
+      fi
+      entries+=(
+        $'changes\t修改候选整合包\t添加、更新、移除或校验模组'
+        $'client_build\t构建客户端包\t创建并验证当前 .mrpack'
+      )
+    fi
+    entries+=( $'__back\t返回\t回到主菜单' )
+
+    selected="$(menu_select "$menu_title" "${entries[@]}")"
+    case "$selected" in
+      start)
+        run_menu_command "开始整合包测试" command_stage start
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        ;;
+      resume)
+        run_menu_command "继续整合包测试" command_stage resume
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        ;;
+      rebuild)
+        run_menu_command "重建测试服" command_stage rebuild
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        ;;
+      logs) run_menu_command --read "测试服日志" command_stage logs ;;
+      pause)
+        run_menu_command "暂停测试服" command_stage stop
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        ;;
+      finish)
+        delete_option="--keep-backup"
+        if [[ "$DASH_SESSION_BACKUP_STATUS" == "tracked" ]]; then
+          if confirm_default_yes "删除本次测试专用备份吗？"; then
+            delete_option="--delete-backup"
+          fi
+        elif [[ "$DASH_SESSION_BACKUP_STATUS" == "untracked" ]]; then
+          warn "无法唯一确认本次测试创建的备份，因此会保留它。"
+        fi
+        run_menu_command "完成测试并清理" command_stage finish "$delete_option" --confirm
+        if [[ "$MENU_LAST_STATUS" -eq 0 ]]; then
+          menu_publish_handoff
+          return 0
+        fi
+        ;;
+      failed)
+        run_menu_command "结束有问题的测试" command_stage discard --confirm
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        ;;
+      cleanup_legacy)
+        printf '\n将释放 %s；只清理 runtime/staging/data 和 data.previous.*。\n' \
+          "$DASH_STAGING_USAGE" >&2
+        if confirm_yes "确认清理这些旧测试副本吗？"; then
+          run_menu_command "清理旧测试数据" command_stage cleanup --confirm
+        else
+          menu_cancelled
+        fi
+        ;;
+      changes) menu_mods ;;
+      client_build) run_menu_command "构建客户端整合包" command_client build ;;
+      publish)
+        menu_publish_handoff
+        return 0
+        ;;
+      __back) return 0 ;;
+    esac
+  done
+}
+
+menu_more_tools() {
+  local selected command_text menu_title
+  while true; do
+    menu_prepare_title menu_title '更多工具'
+    selected="$(menu_select "$menu_title" \
+      $'status\t正式服详细状态\t显示 Compose 服务和本机地址' \
+      $'logs\t正式服日志\tCtrl-C 只退出日志' \
+      $'console\t正式服控制台\t使用 Ctrl-P、Ctrl-Q 依次分离' \
+      $'rcon\t执行 Minecraft 命令\t通过内部 RCON 发送一条命令' \
+      $'restart\t安全重启正式服\t保存、备份、停止后重新启动' \
+      $'stop_skip\t关服并跳过远端备份\t仍创建必要的本机备份' \
+      $'init\t初始化本机文件\t创建缺少的 .env、密钥和 runtime 目录' \
+      $'edit\t编辑 .env\t保存后立即校验世界设置' \
+      $'doctor\t运行诊断\t检查依赖、设置、Docker 和发布元数据' \
+      $'help\t完整命令参考\t显示高级非交互命令' \
+      $'__back\t返回\t回到主菜单')"
+    case "$selected" in
+      status) run_menu_command --read "正式服务器详情" command_status ;;
+      logs) run_menu_command --read "正式服务器日志" command_production_logs ;;
+      console) run_menu_command --read "正式服务器控制台" command_console ;;
+      rcon)
+        command_text="$(prompt_value 'Minecraft 命令（不要输入 /）：')" \
+          || { menu_cancelled; continue; }
+        run_menu_command --read "RCON: $command_text" run_rcon_command "$command_text"
+        ;;
+      restart)
+        if confirm_yes "要安全停止并重启正式服吗？"; then
+          run_menu_command "重启正式服务器" command_restart
+          [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        else menu_cancelled; fi
+        ;;
+      stop_skip)
+        if confirm_yes "要停止正式服并跳过远端备份吗？"; then
+          run_menu_command "跳过远端备份并关服" command_stop --skip-remote
+          [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        else menu_cancelled; fi
+        ;;
+      init) run_menu_command "初始化本机文件" command_init ;;
+      edit) run_menu_command "编辑本机配置" menu_edit_env ;;
+      doctor) run_menu_command --read "环境诊断" command_doctor ;;
+      help) run_menu_command --read "高级命令参考" usage_all ;;
+      __back) return 0 ;;
+    esac
+  done
 }
 
 command_menu() {
@@ -1715,29 +1991,38 @@ command_menu() {
     MENU_FZF=true
   fi
 
-  local selected
+  local selected server_action server_label server_description
   while true; do
     dashboard_collect
     dashboard_render
-    selected="$(menu_select '主菜单' \
-      "recommended"$'\t'"★ 建议：$DASH_RECOMMENDED_LABEL"$'\t'"根据当前本机状态生成" \
-      $'server\t正式服务器\t启动、停止、状态、日志、控制台和 RCON' \
-      $'players\t玩家与权限\t在线玩家、白名单、OP 与撤销 OP' \
-      $'mods\t模组与客户端包\t添加、更新、移除、校验和构建' \
-      $'release\t测试服与发布\t测试、接受并发布整合包变更' \
-      $'world_backup\t世界与备份\t检查、重置、备份、恢复和删除' \
-      $'settings\t设置与诊断\t初始化、编辑 .env、诊断和帮助' \
-      $'refresh\t刷新状态\t重新检测当前状态' \
+    if [[ "$DASH_PRODUCTION" == "healthy" || "$DASH_PRODUCTION" == "running" \
+      || "$DASH_PRODUCTION" == "starting" || "$DASH_PRODUCTION" == "unhealthy" ]]; then
+      server_action="server_stop"
+      server_label="安全停止正式服"
+      server_description="通知玩家、保存并备份后停止"
+    else
+      server_action="server_start"
+      server_label="启动正式服"
+      server_description="创建停服快照后启动"
+    fi
+    selected="$(menu_select '今天要做什么？' \
+      "$server_action"$'\t'"$server_label"$'\t'"$server_description" \
+      $'players\t管理玩家\t在线玩家、白名单和 OP 权限' \
+      "pack"$'\t'"维护整合包"$'\t'"$DASH_WORKFLOW" \
+      "world_backup"$'\t'"备份与恢复"$'\t'"本机 $DASH_BACKUP_USAGE；世界状态、备份和恢复" \
+      $'more\t更多工具\t状态、日志、控制台、设置和诊断' \
       $'quit\t退出\t不做任何更改并离开 mcctl')"
     case "$selected" in
-      recommended) menu_recommended ;;
-      server) menu_server ;;
+      server_start) run_menu_command "启动正式服务器" command_start ;;
+      server_stop)
+        if confirm_yes "要通知玩家、保存、备份并停止正式服吗？"; then
+          run_menu_command "安全停止正式服务器" command_stop
+        else menu_cancelled; fi
+        ;;
       players) menu_players ;;
-      mods) menu_mods ;;
-      release) menu_release ;;
+      pack) menu_pack_workflow ;;
       world_backup) menu_world_backup ;;
-      settings) menu_settings ;;
-      refresh) continue ;;
+      more) menu_more_tools ;;
       quit|__back) break ;;
     esac
   done

@@ -16,6 +16,11 @@ class McctlMenuTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory(prefix="wezza-menu-test-")
         self.root = Path(self.temp_dir.name)
         shutil.copy2(ROOT / "mcctl", self.root / "mcctl")
+        (self.root / "tools").mkdir()
+        shutil.copy2(
+            ROOT / "tools" / "staging_session.py",
+            self.root / "tools" / "staging_session.py",
+        )
         (self.root / "runtime" / "backups" / "local").mkdir(parents=True)
         (self.root / "runtime" / "backups" / "offline").mkdir(parents=True)
 
@@ -56,9 +61,9 @@ class McctlMenuTests(unittest.TestCase):
     def test_plain_menu_reports_missing_setup_and_quits(self) -> None:
         result = self.run_mcctl("menu", "--plain", menu_input="q\n")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("本机配置", result.stdout)
+        self.assertIn("运行环境", result.stdout)
         self.assertIn("缺少 .env", result.stdout)
-        self.assertIn("主菜单", result.stderr)
+        self.assertIn("今天要做什么？", result.stderr)
 
     def test_help_all_keeps_advanced_commands_discoverable(self) -> None:
         result = self.run_mcctl("help", "--all")
@@ -68,7 +73,6 @@ class McctlMenuTests(unittest.TestCase):
 
     def test_dashboard_reports_healthy_services_from_one_compose_snapshot(self) -> None:
         tools_dir = self.root / "tools"
-        tools_dir.mkdir()
         shutil.copy2(ROOT / "tools" / "world_control.py", tools_dir)
         (self.root / ".env").write_text(
             "EULA=TRUE\n"
@@ -112,10 +116,10 @@ class McctlMenuTests(unittest.TestCase):
             extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Docker        可用", result.stdout)
         self.assertIn("正式服务器    健康", result.stdout)
-        self.assertIn("测试服务器    健康", result.stdout)
-        self.assertIn("查看正式服务器详情", result.stdout)
+        self.assertIn("测试服数据    0 份 · 0 B · 服务健康", result.stdout)
+        self.assertIn("配置就绪 · Docker可用", result.stdout)
+        self.assertIn("安全停止正式服", result.stderr)
 
     def test_dashboard_reports_combined_local_backup_usage(self) -> None:
         (self.root / "runtime" / "backups" / "local" / "local.tar.zst").write_bytes(
@@ -128,6 +132,19 @@ class McctlMenuTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("本机备份      2 个 · 3.0 KiB", result.stdout)
 
+    def test_legacy_staging_usage_becomes_an_explicit_cleanup_task(self) -> None:
+        legacy_world = self.root / "runtime" / "staging" / "data" / "world"
+        legacy_world.mkdir(parents=True)
+        (legacy_world / "level.dat").write_bytes(b"x" * 2048)
+
+        result = self.run_mcctl(
+            "menu", "--plain", menu_input="3\nq\nq\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("旧测试数据待清理", result.stdout)
+        self.assertIn("清理旧测试数据（2.0 KiB）", result.stderr)
+        self.assertTrue((legacy_world / "level.dat").is_file())
+
     def test_menu_delete_defaults_to_no_and_accepts_n_case_insensitively(self) -> None:
         target = self.archive()
         for answer in ("", "n", "N"):
@@ -135,7 +152,7 @@ class McctlMenuTests(unittest.TestCase):
                 result = self.run_mcctl(
                     "menu",
                     "--plain",
-                    menu_input=f"6\n7\n1\n{answer}\nq\nq\n",
+                    menu_input=f"4\n7\n1\n{answer}\nq\nq\n",
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(target.exists())
@@ -148,7 +165,7 @@ class McctlMenuTests(unittest.TestCase):
                 result = self.run_mcctl(
                     "menu",
                     "--plain",
-                    menu_input=f"6\n7\n1\n{answer}\nq\nq\n",
+                    menu_input=f"4\n7\n1\n{answer}\nq\nq\n",
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(target.exists())
@@ -160,7 +177,7 @@ class McctlMenuTests(unittest.TestCase):
         result = self.run_mcctl(
             "menu",
             "--plain",
-            menu_input="6\n7\n1\nmaybe\nY\nq\nq\n",
+            menu_input="4\n7\n1\nmaybe\nY\nq\nq\n",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(target.exists())
@@ -168,7 +185,6 @@ class McctlMenuTests(unittest.TestCase):
 
     def test_successful_server_lifecycle_action_returns_to_dashboard(self) -> None:
         tools_dir = self.root / "tools"
-        tools_dir.mkdir()
         shutil.copy2(ROOT / "tools" / "world_control.py", tools_dir)
         (self.root / ".env").write_text(
             "EULA=TRUE\n"
@@ -205,12 +221,13 @@ class McctlMenuTests(unittest.TestCase):
         result = self.run_mcctl(
             "menu",
             "--plain",
-            menu_input="2\n1\ny\n9\n",
+            menu_input="1\nq\n",
             extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("操作已成功完成", result.stdout)
-        self.assertEqual(result.stderr.count("\n正式服务器\n"), 1)
+        self.assertNotIn("\n正式服务器\n", result.stderr)
+        self.assertIn("✓ 启动正式服务器 完成", result.stdout)
         self.assertGreaterEqual(result.stdout.count("Wezza MC 管理面板"), 2)
 
     def test_doctor_fails_actionably_in_an_uninitialized_copy(self) -> None:
