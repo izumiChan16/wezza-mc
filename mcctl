@@ -298,7 +298,7 @@ command_start() {
   while (( attempts < 60 )); do
     health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
     if [[ "$health" == "healthy" ]]; then
-      info "Server is healthy at 127.0.0.1:${MC_PORT:-25565}"
+      info "Server is healthy on ${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
       return 0
     fi
     if [[ "$health" == "exited" || "$health" == "dead" ]]; then
@@ -336,8 +336,8 @@ command_status() {
   load_settings
   docker_ready
   compose --profile staging ps
-  printf '\nProduction: 127.0.0.1:%s\nStaging:    127.0.0.1:%s\n' \
-    "${MC_PORT:-25565}" "${STAGING_PORT:-25566}"
+  printf '\nProduction bind: %s:%s\nStaging bind:    127.0.0.1:%s\n' \
+    "${MC_BIND_IP:-127.0.0.1}" "${MC_PORT:-25565}" "${STAGING_PORT:-25566}"
 }
 
 command_world() {
