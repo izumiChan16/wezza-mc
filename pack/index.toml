@@ -151,6 +151,11 @@ hash = "4696688294bcad849968ec141304e7466bef85108ae61474c553f603c0b405b2"
 metafile = true
 
 [[files]]
+file = "mods/veinminer.pw.toml"
+hash = "d746947799093e8035c1c712c78c3db720fb824334f8fad91e1598c1ead401ef"
+metafile = true
+
+[[files]]
 file = "mods/xaeros-minimap.pw.toml"
 hash = "b6ac5f3dfeecbc9d9ef9fb3298662c1d0c6dbb69300c08e56a6328db5ae6206a"
 metafile = true
