@@ -16,8 +16,13 @@ class PackListingTests(unittest.TestCase):
         mods, errors, _warnings = validate_pack.validate(ROOT / "pack")
         self.assertFalse(errors)
         self.assertTrue(mods)
-        self.assertEqual(mods[0]["slug"], "badoptimizations")
-        self.assertEqual(mods[0]["metadata"], "mods/badoptimizations.pw.toml")
+        badoptimizations = next(
+            mod for mod in mods if mod["slug"] == "badoptimizations"
+        )
+        self.assertEqual(badoptimizations["slug"], "badoptimizations")
+        self.assertEqual(
+            badoptimizations["metadata"], "mods/badoptimizations.pw.toml"
+        )
 
     def test_cli_table_contains_slug_header_and_known_slug(self) -> None:
         result = subprocess.run(

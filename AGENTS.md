@@ -8,6 +8,7 @@
 - `tools/` contains Python validation, release, and world-state tooling plus the pinned Packwiz image.
 - `tests/` contains isolated standard-library tests; never point them at `runtime/`.
 - `site/` contains GitHub Pages and release metadata; `docs/` contains administrator documentation.
+- Keep `README.md` as a navigation-only page linking the public user guide and `docs/ADMIN_GUIDE.md`; do not add operational or explanatory content to it.
 - `.github/workflows/` validates and deploys. Generated or private state belongs in ignored `dist/`, `runtime/`, `.env`, and `secrets/` paths.
 
 ## Build, Test, and Development Commands

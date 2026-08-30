@@ -18,6 +18,21 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
+用法：./mcctl [命令]
+
+交互管理：
+  ./mcctl                    在交互终端中打开管理面板
+  ./mcctl menu               显式打开管理面板
+  ./mcctl menu --plain       使用零依赖的编号菜单
+  ./mcctl doctor             检查本机配置和依赖
+
+执行 './mcctl help --all' 查看完整命令参考。
+原有 './mcctl start' 等命令仍可用于脚本和故障排查。
+EOF
+}
+
+usage_all() {
+  cat <<'EOF'
 Usage: ./mcctl <command>
 
 Server:
@@ -202,6 +217,51 @@ latest_backup() {
     -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-
 }
 
+format_bytes() {
+  local bytes="${1:-0}" unit_index=0 unit_size=1 whole tenths
+  local -a units=(B KiB MiB GiB TiB)
+  [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+  while (( bytes >= unit_size * 1024 && unit_index < ${#units[@]} - 1 )); do
+    unit_size=$((unit_size * 1024))
+    unit_index=$((unit_index + 1))
+  done
+  if (( unit_index == 0 )); then
+    printf '%d B\n' "$bytes"
+  else
+    whole=$((bytes / unit_size))
+    tenths=$((((bytes % unit_size) * 10) / unit_size))
+    printf '%d.%d %s\n' "$whole" "$tenths" "${units[unit_index]}"
+  fi
+}
+
+collect_backup_stats() {
+  BACKUP_LOCAL_COUNT=0
+  BACKUP_LOCAL_BYTES=0
+  BACKUP_OFFLINE_COUNT=0
+  BACKUP_OFFLINE_BYTES=0
+  local size
+  while IFS= read -r -d '' size; do
+    [[ "$size" =~ ^[0-9]+$ ]] || continue
+    BACKUP_LOCAL_COUNT=$((BACKUP_LOCAL_COUNT + 1))
+    BACKUP_LOCAL_BYTES=$((BACKUP_LOCAL_BYTES + size))
+  done < <(
+    find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type f \
+      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+      -printf '%s\0' 2>/dev/null
+  )
+  while IFS= read -r -d '' size; do
+    [[ "$size" =~ ^[0-9]+$ ]] || continue
+    BACKUP_OFFLINE_COUNT=$((BACKUP_OFFLINE_COUNT + 1))
+    BACKUP_OFFLINE_BYTES=$((BACKUP_OFFLINE_BYTES + size))
+  done < <(
+    find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
+      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+      -printf '%s\0' 2>/dev/null
+  )
+  BACKUP_TOTAL_COUNT=$((BACKUP_LOCAL_COUNT + BACKUP_OFFLINE_COUNT))
+  BACKUP_TOTAL_BYTES=$((BACKUP_LOCAL_BYTES + BACKUP_OFFLINE_BYTES))
+}
+
 resolve_backup() {
   local requested="$1"
   local requested_name="$requested" requested_scope="" candidate
@@ -256,6 +316,7 @@ run_remote_backup() {
 }
 
 command_init() {
+  [[ $# -eq 0 ]] || die "Usage: ./mcctl init"
   if [[ ! -f "${ROOT_DIR}/.env" ]]; then
     cp "${ROOT_DIR}/.env.example" "${ROOT_DIR}/.env"
     info "Created .env; set EULA=TRUE and replace the GitHub Pages URL before starting"
@@ -280,6 +341,7 @@ command_init() {
 }
 
 command_start() {
+  [[ $# -eq 0 ]] || die "Usage: ./mcctl start"
   load_settings
   ensure_initialized
   docker_ready
@@ -313,6 +375,8 @@ command_start() {
 }
 
 command_stop() {
+  [[ $# -eq 0 || ( $# -eq 1 && "$1" == "--skip-remote" ) ]] \
+    || die "Usage: ./mcctl stop [--skip-remote]"
   load_settings
   ensure_initialized
   docker_ready
@@ -333,11 +397,50 @@ command_stop() {
 }
 
 command_status() {
+  [[ $# -eq 0 ]] || die "Usage: ./mcctl status"
   load_settings
   docker_ready
   compose --profile staging ps
   printf '\nProduction bind: %s:%s\nStaging bind:    127.0.0.1:%s\n' \
     "${MC_BIND_IP:-127.0.0.1}" "${MC_PORT:-25565}" "${STAGING_PORT:-25566}"
+}
+
+command_restart() {
+  [[ $# -eq 0 ]] || die "Usage: ./mcctl restart"
+  command_stop
+  command_start
+}
+
+command_production_logs() {
+  [[ $# -eq 0 ]] || die "Usage: ./mcctl logs"
+  load_settings
+  docker_ready
+  compose logs -f minecraft
+}
+
+command_console() {
+  [[ $# -eq 0 ]] || die "Usage: ./mcctl console"
+  load_settings
+  docker_ready
+  [[ -t 0 && -t 1 ]] || die "The Minecraft console requires an interactive WSL terminal."
+  service_running minecraft || die "The production server is not running."
+  local container_id attach_status
+  container_id="$(compose ps --status running -q minecraft)"
+  [[ -n "$container_id" ]] || die "The production server container could not be located."
+  printf '\nConnected to the production Minecraft console.\n'
+  printf 'The console has no prompt; type a command and press Enter. Do not include the leading /.\n'
+  printf 'Detach with Ctrl-P, then Ctrl-Q. Ctrl+C is not sent to the Minecraft process.\n\n'
+  if docker attach --sig-proxy=false "$container_id"; then
+    attach_status=0
+  else
+    attach_status=$?
+  fi
+  if service_running minecraft; then
+    info "Console detached; the production server is still running."
+  else
+    warn "Console ended because the production server is no longer running."
+  fi
+  return "$attach_status"
 }
 
 command_world() {
@@ -637,6 +740,8 @@ command_mod() {
 
 command_stage() {
   local action="${1:-start}"
+  (( $# == 0 )) || shift
+  [[ $# -eq 0 ]] || die "Usage: ./mcctl stage start|stop|logs|accept"
   load_settings
   ensure_initialized
   docker_ready
@@ -687,14 +792,33 @@ command_stage() {
 
 command_backup_list() {
   mkdir -p "$LOCAL_BACKUP_DIR" "$OFFLINE_BACKUP_DIR"
-  {
-    find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type f \
-      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
-      -printf '%TY-%Tm-%Td %TH:%TM  local    %10s  %f\n'
-    find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
-      \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
-      -printf '%TY-%Tm-%Td %TH:%TM  offline  %10s  %f\n'
-  } | sort -r
+  collect_backup_stats
+  printf 'Backup usage:\n'
+  printf '  local    %3d archive(s)  %s\n' \
+    "$BACKUP_LOCAL_COUNT" "$(format_bytes "$BACKUP_LOCAL_BYTES")"
+  printf '  offline  %3d archive(s)  %s\n' \
+    "$BACKUP_OFFLINE_COUNT" "$(format_bytes "$BACKUP_OFFLINE_BYTES")"
+  printf '  total    %3d archive(s)  %s\n' \
+    "$BACKUP_TOTAL_COUNT" "$(format_bytes "$BACKUP_TOTAL_BYTES")"
+  if (( BACKUP_TOTAL_COUNT == 0 )); then
+    return 0
+  fi
+  printf '\nArchives:\n'
+  local epoch timestamp scope size filename
+  while IFS=$'\t' read -r epoch timestamp scope size filename; do
+    [[ -n "$filename" ]] || continue
+    printf '%s  %-7s %10s  %s\n' \
+      "$timestamp" "$scope" "$(format_bytes "$size")" "$filename"
+  done < <(
+    {
+      find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type f \
+        \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+        -printf '%T@\t%TY-%Tm-%Td %TH:%TM\tlocal\t%s\t%f\n'
+      find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
+        \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+        -printf '%T@\t%TY-%Tm-%Td %TH:%TM\toffline\t%s\t%f\n'
+    } | sort -rn
+  )
 }
 
 command_backup_delete() {
@@ -799,60 +923,866 @@ command_client() {
   esac
 }
 
+# Interactive dashboard -----------------------------------------------------
+
+MENU_PLAIN=false
+MENU_FZF=false
+
+menu_clear() {
+  if [[ -t 1 && -n "${TERM:-}" && "${TERM:-dumb}" != "dumb" ]]; then
+    tput clear 2>/dev/null || printf '\033[2J\033[H'
+  fi
+}
+
+menu_pause() {
+  [[ "${MCCTL_MENU_NO_PAUSE:-false}" == "true" ]] && return 0
+  printf '\n按 Enter 返回菜单……' >&2
+  IFS= read -r _ || true
+}
+
+menu_select() {
+  local title="$1"
+  shift
+  local selected entry id label description choice index
+  local -a ids=()
+
+  if [[ "$MENU_FZF" == true ]]; then
+    selected="$(printf '%s\n' "$@" | fzf \
+      --height=80% --layout=reverse --border --cycle \
+      --delimiter=$'\t' --with-nth=2,3 \
+      --prompt='搜索 / 选择 > ' \
+      --header="$title  ·  Enter：选择  Esc：返回" || true)"
+    [[ -n "$selected" ]] || { printf '%s\n' "__back"; return 0; }
+    printf '%s\n' "${selected%%$'\t'*}"
+    return 0
+  fi
+
+  printf '\n%s\n' "$title" >&2
+  printf '%s\n' "────────────────────────────────────────" >&2
+  index=0
+  for entry in "$@"; do
+    index=$((index + 1))
+    id="${entry%%$'\t'*}"
+    entry="${entry#*$'\t'}"
+    label="${entry%%$'\t'*}"
+    description="${entry#*$'\t'}"
+    ids+=("$id")
+    printf '%2d) %s\n    %s\n' "$index" "$label" "$description" >&2
+  done
+  printf ' q) 返回 / 退出\n' >&2
+  while true; do
+    printf '请选择：' >&2
+    IFS= read -r choice || { printf '%s\n' "__back"; return 0; }
+    case "$choice" in
+      q|Q|b|B|"") printf '%s\n' "__back"; return 0 ;;
+      *[!0-9]*) printf '请输入菜单编号或 q。\n' >&2 ;;
+      *)
+        if (( choice >= 1 && choice <= ${#ids[@]} )); then
+          printf '%s\n' "${ids[choice-1]}"
+          return 0
+        fi
+        printf '没有这个菜单项。\n' >&2
+        ;;
+    esac
+  done
+}
+
+prompt_value() {
+  local prompt="$1" value
+  printf '%s' "$prompt" >&2
+  IFS= read -r value || return 1
+  [[ -n "$value" ]] || return 1
+  printf '%s\n' "$value"
+}
+
+confirm_yes() {
+  local prompt="$1" answer
+  while true; do
+    printf '%s [y/N]：' "$prompt" >&2
+    IFS= read -r answer || return 1
+    case "$answer" in
+      y|Y) return 0 ;;
+      n|N|"") return 1 ;;
+      *) warn "请输入 Y 或 N；直接按 Enter 默认为 N。" ;;
+    esac
+  done
+}
+
+confirm_phrase() {
+  local phrase="$1" answer
+  printf '请输入完整确认短语 "%s"：' "$phrase" >&2
+  IFS= read -r answer || return 1
+  [[ "$answer" == "$phrase" ]]
+}
+
+run_menu_command() {
+  local title="$1"
+  shift
+  local status
+  menu_clear
+  printf '=== %s ===\n\n' "$title"
+  trap '' INT
+  if ( trap - INT; "$@" ); then
+    status=0
+    printf '\n操作已成功完成。\n'
+  else
+    status=$?
+    if [[ "$status" -eq 130 ]]; then
+      printf '\n已中断当前操作，正在返回菜单。\n' >&2
+    else
+      printf '\n操作失败（退出码 %d），请检查上方信息。\n' "$status" >&2
+    fi
+  fi
+  trap - INT
+  MENU_LAST_STATUS="$status"
+  [[ "$status" -eq 130 ]] || menu_pause
+  return 0
+}
+
+dashboard_collect() {
+  DASH_INITIALIZED=false
+  DASH_CONFIG="missing"
+  DASH_DOCKER="unavailable"
+  DASH_PRODUCTION="unknown"
+  DASH_STAGING="unknown"
+  DASH_PACK_VERSION="unknown"
+  DASH_PACK_DIRTY=false
+  DASH_PACK_ACCEPTED=false
+  DASH_LATEST_BACKUP="none"
+  DASH_BACKUP_USAGE="0 个 · 0 B"
+  DASH_REMOTE_BACKUP="disabled"
+  DASH_PRODUCTION_ADDRESS="${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
+  DASH_RECOMMENDED_ID="doctor"
+  DASH_RECOMMENDED_LABEL="运行环境诊断"
+
+  if [[ -f "${ROOT_DIR}/.env" ]]; then
+    DASH_INITIALIZED=true
+    if load_settings; then
+      DASH_PRODUCTION_ADDRESS="${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
+      if validate_world_config >/dev/null 2>&1 \
+        && [[ "${PACKWIZ_URL:-}" == https://* ]] \
+        && [[ "${PACKWIZ_URL:-}" != *YOUR_GITHUB_USER* ]] \
+        && [[ "${PACKWIZ_URL:-}" != *example.invalid* ]] \
+        && [[ -s "${ROOT_DIR}/secrets/rcon_password.txt" ]] \
+        && [[ -s "${ROOT_DIR}/secrets/restic_password.txt" ]] \
+        && [[ -s "${ROOT_DIR}/secrets/aws_credentials" ]]; then
+        if [[ "${EULA:-FALSE}" == "TRUE" ]]; then
+          DASH_CONFIG="ready"
+        else
+          DASH_CONFIG="EULA not accepted"
+        fi
+      else
+        DASH_CONFIG="needs attention"
+      fi
+      [[ "${ENABLE_REMOTE_BACKUP:-false}" == "true" ]] && DASH_REMOTE_BACKUP="enabled"
+    else
+      DASH_CONFIG="invalid shell syntax"
+    fi
+  fi
+
+  local running_services="" container_id health
+  if docker info >/dev/null 2>&1; then
+    DASH_DOCKER="ready"
+    running_services="$(compose --profile staging ps --status running --services 2>/dev/null || true)"
+    if grep -Fxq minecraft <<< "$running_services"; then
+      DASH_PRODUCTION="running"
+      container_id="$(compose ps -q minecraft 2>/dev/null || true)"
+      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+        "$container_id" 2>/dev/null || true)"
+      [[ -n "$health" ]] && DASH_PRODUCTION="$health"
+    else
+      DASH_PRODUCTION="stopped"
+    fi
+    if grep -Fxq minecraft-staging <<< "$running_services"; then
+      DASH_STAGING="running"
+      container_id="$(compose --profile staging ps -q minecraft-staging 2>/dev/null || true)"
+      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+        "$container_id" 2>/dev/null || true)"
+      [[ -n "$health" ]] && DASH_STAGING="$health"
+    else
+      DASH_STAGING="stopped"
+    fi
+  fi
+
+  if [[ -f "${ROOT_DIR}/pack/pack.toml" ]]; then
+    DASH_PACK_VERSION="$(python3 "${ROOT_DIR}/tools/release_pack.py" version \
+      --pack-dir "${ROOT_DIR}/pack" 2>/dev/null || printf 'unknown')"
+  fi
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    [[ -n "$(git -C "$ROOT_DIR" status --porcelain=v1 -- pack 2>/dev/null || true)" ]] \
+      && DASH_PACK_DIRTY=true
+  fi
+  if [[ -s "$ACCEPTED_FILE" ]]; then
+    local accepted_hash current_hash
+    accepted_hash="$(<"$ACCEPTED_FILE")"
+    current_hash="$(pack_sha256 2>/dev/null || true)"
+    [[ -n "$current_hash" && "$accepted_hash" == "$current_hash" ]] && DASH_PACK_ACCEPTED=true
+  fi
+
+  local backup
+  backup="$(latest_backup 2>/dev/null || true)"
+  if [[ -n "$backup" ]]; then
+    DASH_LATEST_BACKUP="$(date -r "$backup" '+%Y-%m-%d %H:%M' 2>/dev/null || printf 'unknown') · $(basename "$backup")"
+  fi
+  collect_backup_stats
+  DASH_BACKUP_USAGE="${BACKUP_TOTAL_COUNT} 个 · $(format_bytes "$BACKUP_TOTAL_BYTES")"
+
+  if [[ "$DASH_INITIALIZED" == false || "$DASH_CONFIG" != "ready" ]]; then
+    DASH_RECOMMENDED_ID="setup"
+    DASH_RECOMMENDED_LABEL="完成初始化与本机配置"
+  elif [[ "$DASH_DOCKER" != "ready" ]]; then
+    DASH_RECOMMENDED_ID="doctor"
+    DASH_RECOMMENDED_LABEL="启动 Docker Desktop 或运行诊断"
+  elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == false \
+    && ( "$DASH_STAGING" == "running" || "$DASH_STAGING" == "healthy" ) ]]; then
+    DASH_RECOMMENDED_ID="stage_accept"
+    DASH_RECOMMENDED_LABEL="接受已经测试的候选整合包"
+  elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == false \
+    && ( "$DASH_STAGING" == "starting" || "$DASH_STAGING" == "unhealthy" ) ]]; then
+    DASH_RECOMMENDED_ID="stage_logs"
+    DASH_RECOMMENDED_LABEL="查看测试服日志并等待其恢复健康"
+  elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == false ]]; then
+    DASH_RECOMMENDED_ID="stage_start"
+    DASH_RECOMMENDED_LABEL="启动测试服验证整合包变更"
+  elif [[ "$DASH_PACK_DIRTY" == true && "$DASH_PACK_ACCEPTED" == true ]]; then
+    DASH_RECOMMENDED_ID="publish"
+    DASH_RECOMMENDED_LABEL="发布已接受的整合包变更"
+  elif [[ "$DASH_PRODUCTION" == "stopped" ]]; then
+    DASH_RECOMMENDED_ID="start"
+    DASH_RECOMMENDED_LABEL="启动正式服务器"
+  else
+    DASH_RECOMMENDED_ID="server_status"
+    DASH_RECOMMENDED_LABEL="查看正式服务器详情"
+  fi
+}
+
+dashboard_render() {
+  local pack_state="无候选变更" config_state docker_state production_state staging_state remote_state latest_backup
+  [[ "$DASH_PACK_DIRTY" == true ]] && pack_state="有待测试的候选变更"
+  [[ "$DASH_PACK_ACCEPTED" == true ]] && pack_state="候选变更已接受"
+  case "$DASH_CONFIG" in
+    ready) config_state="就绪" ;;
+    missing) config_state="缺少 .env" ;;
+    "EULA not accepted") config_state="尚未接受 EULA" ;;
+    "needs attention") config_state="需要处理" ;;
+    "invalid shell syntax") config_state=".env 语法错误" ;;
+    *) config_state="$DASH_CONFIG" ;;
+  esac
+  case "$DASH_DOCKER" in ready) docker_state="可用" ;; *) docker_state="不可用" ;; esac
+  case "$DASH_PRODUCTION" in
+    healthy) production_state="健康" ;; running) production_state="运行中" ;;
+    starting) production_state="启动中" ;; unhealthy) production_state="不健康" ;;
+    stopped) production_state="已停止" ;; *) production_state="未知" ;;
+  esac
+  case "$DASH_STAGING" in
+    healthy) staging_state="健康" ;; running) staging_state="运行中" ;;
+    starting) staging_state="启动中" ;; unhealthy) staging_state="不健康" ;;
+    stopped) staging_state="已停止" ;; *) staging_state="未知" ;;
+  esac
+  case "$DASH_REMOTE_BACKUP" in enabled) remote_state="已启用" ;; *) remote_state="未启用" ;; esac
+  latest_backup="$DASH_LATEST_BACKUP"
+  [[ "$latest_backup" == "none" ]] && latest_backup="暂无"
+  menu_clear
+  cat <<EOF
+Wezza MC 管理面板
+────────────────────────────────────────────────────────────
+本机配置      $config_state
+Docker        $docker_state
+正式服务器    $production_state · $DASH_PRODUCTION_ADDRESS
+测试服务器    $staging_state
+整合包        $DASH_PACK_VERSION · $pack_state
+最新备份      $latest_backup
+本机备份      $DASH_BACKUP_USAGE
+远端备份      $remote_state
+────────────────────────────────────────────────────────────
+建议操作      $DASH_RECOMMENDED_LABEL
+EOF
+}
+
+doctor_item() {
+  local level="$1" label="$2" detail="$3"
+  printf '%-5s %-24s %s\n' "$level" "$label" "$detail"
+}
+
+command_doctor() {
+  local failures=0 warnings=0 dependency
+  printf 'Wezza MC 环境诊断\n\n'
+  for dependency in bash python3 git docker tar zstd openssl; do
+    if command -v "$dependency" >/dev/null 2>&1; then
+      doctor_item OK "$dependency" "$(command -v "$dependency")"
+    else
+      doctor_item FAIL "$dependency" "缺少必需命令"
+      failures=$((failures + 1))
+    fi
+  done
+  if command -v fzf >/dev/null 2>&1; then
+    doctor_item OK fzf "可使用方向键搜索菜单"
+  else
+    doctor_item WARN fzf "未安装，将自动使用编号菜单"
+    warnings=$((warnings + 1))
+  fi
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    doctor_item OK "Docker Compose" "CLI 插件可用"
+  else
+    doctor_item FAIL "Docker Compose" "缺少 docker compose CLI 插件"
+    failures=$((failures + 1))
+  fi
+
+  if [[ -f "${ROOT_DIR}/.env" ]]; then
+    doctor_item OK .env "文件存在"
+    if load_settings && validate_world_config >/dev/null 2>&1; then
+      doctor_item OK "世界配置" "有效"
+    else
+      doctor_item FAIL "世界配置" "无效，请编辑 .env 后重试"
+      failures=$((failures + 1))
+    fi
+    if [[ "${EULA:-FALSE}" == "TRUE" ]]; then
+      doctor_item OK EULA "已由本机管理员接受"
+    else
+      doctor_item WARN EULA "请本人阅读 Minecraft EULA 后设置 EULA=TRUE"
+      warnings=$((warnings + 1))
+    fi
+    if [[ "${PACKWIZ_URL:-}" == https://* \
+      && "${PACKWIZ_URL:-}" != *YOUR_GITHUB_USER* \
+      && "${PACKWIZ_URL:-}" != *example.invalid* ]]; then
+      doctor_item OK PACKWIZ_URL "$PACKWIZ_URL"
+    else
+      doctor_item FAIL PACKWIZ_URL "必须是真实的 HTTPS pack.toml 地址"
+      failures=$((failures + 1))
+    fi
+  else
+    doctor_item FAIL .env "缺少，请执行 './mcctl init'"
+    failures=$((failures + 1))
+  fi
+
+  local secret secret_mode secret_mode_value
+  for secret in rcon_password.txt restic_password.txt aws_credentials; do
+    if [[ -s "${ROOT_DIR}/secrets/${secret}" ]]; then
+      secret_mode="$(stat -c '%a' "${ROOT_DIR}/secrets/${secret}" 2>/dev/null || printf 'unknown')"
+      if [[ "$secret_mode" =~ ^[0-7]{3,4}$ ]]; then
+        secret_mode_value="$(printf '%d' "0${secret_mode}" 2>/dev/null || printf '511')"
+      else
+        secret_mode_value=511
+      fi
+      if (( (secret_mode_value & 63) == 0 )); then
+        doctor_item OK "secrets/$secret" "文件存在，权限 $secret_mode"
+      else
+        doctor_item WARN "secrets/$secret" "权限 $secret_mode 过宽，建议 chmod 600"
+        warnings=$((warnings + 1))
+      fi
+    else
+      doctor_item FAIL "secrets/$secret" "缺少或为空，请执行 './mcctl init'"
+      failures=$((failures + 1))
+    fi
+  done
+
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    doctor_item OK Docker "守护进程可访问"
+    if compose config --quiet >/dev/null 2>&1; then
+      doctor_item OK Compose "配置有效"
+    else
+      doctor_item FAIL Compose "配置校验失败"
+      failures=$((failures + 1))
+    fi
+  else
+    doctor_item WARN Docker "不可用，请启动 Docker Desktop 并启用 WSL integration"
+    warnings=$((warnings + 1))
+  fi
+
+  if python3 "${ROOT_DIR}/tools/release_pack.py" release-check \
+    --pack-dir "${ROOT_DIR}/pack" --release "$RELEASE_FILE" >/dev/null 2>&1; then
+    doctor_item OK "发布元数据" "与当前整合包一致"
+  else
+    doctor_item FAIL "发布元数据" "release-check 校验失败"
+    failures=$((failures + 1))
+  fi
+
+  printf '\n诊断完成：%d 个错误，%d 个警告。\n' "$failures" "$warnings"
+  (( failures == 0 ))
+}
+
+run_rcon_command() {
+  [[ $# -ge 1 ]] || die "Usage: ./mcctl rcon <command...>"
+  load_settings
+  docker_ready
+  service_running minecraft || die "The production server is not running."
+  compose exec -T minecraft rcon-cli "$*"
+}
+
+run_whitelist_command() {
+  local action="${1:-}" player="${2:-}"
+  case "$action" in
+    add|remove)
+      [[ $# -eq 2 && -n "$player" ]] || die "Usage: ./mcctl whitelist add|remove <player>"
+      run_rcon_command "whitelist $action $player"
+      ;;
+    list)
+      [[ $# -eq 1 ]] || die "Usage: ./mcctl whitelist list"
+      run_rcon_command 'whitelist list'
+      ;;
+    *) die "Usage: ./mcctl whitelist add|remove|list [player]" ;;
+  esac
+}
+
+menu_cancelled() {
+  info "操作已取消，没有进行任何更改。"
+}
+
+prompt_player() {
+  local player
+  player="$(prompt_value 'Minecraft 玩家名：')" || return 1
+  if [[ ! "$player" =~ ^[A-Za-z0-9_]{3,16}$ ]]; then
+    warn "玩家名必须由 3–16 个英文字母、数字或下划线组成。"
+    return 1
+  fi
+  printf '%s\n' "$player"
+}
+
+select_mod_slug() {
+  local path slug name selected
+  local -a entries=()
+  for path in "${ROOT_DIR}"/pack/mods/*.pw.toml; do
+    [[ -f "$path" ]] || continue
+    slug="$(basename "$path" .pw.toml)"
+    name="$(sed -n 's/^name = "\(.*\)"$/\1/p' "$path" | head -n 1)"
+    [[ -n "$name" ]] || name="Packwiz metadata"
+    entries+=("${slug}"$'\t'"${slug}"$'\t'"${name}")
+  done
+  (( ${#entries[@]} > 0 )) || { warn "没有找到模组元数据。"; return 1; }
+  selected="$(menu_select '选择模组' "${entries[@]}")"
+  [[ "$selected" != "__back" ]] || return 1
+  printf '%s\n' "$selected"
+}
+
+select_backup_id() {
+  local epoch scope size filename timestamp selected
+  local -a entries=()
+  while IFS=$'\t' read -r epoch scope size filename; do
+    [[ -n "$filename" ]] || continue
+    timestamp="$(date -d "@${epoch%.*}" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '时间未知')"
+    entries+=("${scope}/${filename}"$'\t'"${scope}/${filename}"$'\t'"${timestamp} · $(format_bytes "$size")")
+  done < <(
+    {
+      find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type f \
+        \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+        -printf '%T@\tlocal\t%s\t%f\n' 2>/dev/null
+      find "$OFFLINE_BACKUP_DIR" -maxdepth 1 -type f \
+        \( -name '*.tar.zst' -o -name '*.tgz' -o -name '*.tar.gz' \) \
+        -printf '%T@\toffline\t%s\t%f\n' 2>/dev/null
+    } | sort -rn
+  )
+  (( ${#entries[@]} > 0 )) || { warn "没有找到本机备份归档。"; return 1; }
+  selected="$(menu_select '选择备份归档' "${entries[@]}")"
+  [[ "$selected" != "__back" ]] || return 1
+  printf '%s\n' "$selected"
+}
+
+menu_edit_env() {
+  [[ -f "${ROOT_DIR}/.env" ]] || command_init
+  local editor_value="${VISUAL:-${EDITOR:-nano}}"
+  local -a editor_command=()
+  read -r -a editor_command <<< "$editor_value"
+  (( ${#editor_command[@]} > 0 )) || die "VISUAL 和 EDITOR 均为空。"
+  command -v "${editor_command[0]}" >/dev/null 2>&1 \
+    || die "找不到编辑器 ${editor_command[0]}，请设置 VISUAL 或 EDITOR。"
+  info "正在打开 .env；只有本人阅读 Minecraft EULA 后才可设置 EULA=TRUE。"
+  "${editor_command[@]}" "${ROOT_DIR}/.env"
+  validate_world_config || die "保存后的世界配置无效。"
+  info "已保存 .env 并校验世界设置；可运行 doctor 完成全部检查。"
+}
+
+menu_server() {
+  local selected command_text
+  while true; do
+    selected="$(menu_select '正式服务器' \
+      $'start\t启动服务器\t创建停服快照后启动正式服' \
+      $'stop\t安全关服\t通知玩家、保存、备份后停止' \
+      $'stop_skip\t关服并跳过远端备份\t仍会创建必要的本机备份' \
+      $'restart\t安全重启\t完整关服后重新启动' \
+      $'status\t详细状态\t显示 Compose 服务和本机地址' \
+      $'logs\t跟随日志\tCtrl-C 只退出日志，不会停止服务器' \
+      $'console\t连接控制台\t使用 Ctrl-P、Ctrl-Q 依次分离' \
+      $'rcon\t执行 Minecraft 命令\t通过内部 RCON 发送一条命令' \
+      $'__back\t返回\t返回状态总览')"
+    case "$selected" in
+    start)
+      if confirm_yes "要启动正式服务器吗？"; then
+        run_menu_command "启动正式服务器" command_start
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    stop)
+      if confirm_yes "要通知玩家、保存、备份并停止正式服吗？"; then
+        run_menu_command "安全停止正式服务器" command_stop
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    stop_skip)
+      if confirm_yes "要停止正式服并仅跳过远端备份吗？"; then
+        run_menu_command "跳过远端备份并关服" command_stop --skip-remote
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    restart)
+      if confirm_yes "要安全停止并重启正式服吗？"; then
+        run_menu_command "重启正式服务器" command_restart
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    status) run_menu_command "正式服务器详情" command_status ;;
+    logs) run_menu_command "正式服务器日志" command_production_logs ;;
+    console) run_menu_command "正式服务器控制台" command_console ;;
+    rcon)
+      command_text="$(prompt_value 'Minecraft 命令（不要输入 /）：')" || { menu_cancelled; continue; }
+      run_menu_command "RCON: $command_text" run_rcon_command "$command_text"
+      ;;
+    __back) return 0 ;;
+    esac
+  done
+}
+
+menu_players() {
+  local selected player
+  while true; do
+    selected="$(menu_select '玩家与权限' \
+      $'online\t查看在线玩家\t查询正式服务器' \
+      $'whitelist_list\t查看白名单\t列出允许加入的 Java 版玩家' \
+      $'whitelist_add\t加入白名单\t允许一名玩家加入' \
+      $'whitelist_remove\t移出白名单\t禁止一名玩家再次加入' \
+      $'op\t授予 OP\t给予 Minecraft 管理员权限' \
+      $'deop\t撤销 OP\t移除 Minecraft 管理员权限' \
+      $'__back\t返回\t返回状态总览')"
+    case "$selected" in
+    online) run_menu_command "在线玩家" run_rcon_command list ;;
+    whitelist_list) run_menu_command "白名单" run_whitelist_command list ;;
+    whitelist_add|whitelist_remove|op|deop)
+      player="$(prompt_player)" || { menu_cancelled; continue; }
+      case "$selected" in
+        whitelist_add) run_menu_command "将 $player 加入白名单" run_whitelist_command add "$player" ;;
+        whitelist_remove)
+          if confirm_yes "要将 $player 移出白名单吗？"; then
+            run_menu_command "将 $player 移出白名单" run_whitelist_command remove "$player"
+          else menu_cancelled; fi
+          ;;
+        op)
+          if confirm_yes "要授予 $player OP 权限吗？"; then
+            run_menu_command "授予 $player OP" run_rcon_command "op $player"
+          else menu_cancelled; fi
+          ;;
+        deop)
+          if confirm_yes "要撤销 $player 的 OP 权限吗？"; then
+            run_menu_command "撤销 $player 的 OP" run_rcon_command "deop $player"
+          else menu_cancelled; fi
+          ;;
+      esac
+      ;;
+    __back) return 0 ;;
+    esac
+  done
+}
+
+menu_mods() {
+  local selected source slug side
+  while true; do
+    selected="$(menu_select '模组与客户端整合包' \
+      $'list\t列出模组\t显示 slug、安装侧、来源和名称' \
+      $'add\t添加模组\t使用 Modrinth slug、CurseForge 或 HTTPS URL' \
+      $'update_check\t检查更新\t在临时整合包副本中比较' \
+      $'update_one\t更新一个模组\t从列表选择，无需手输 slug' \
+      $'update_all\t更新全部模组\t校验通过后应用本地候选版本' \
+      $'side\t修改安装侧\t设为仅客户端、仅服务端或双方' \
+      $'remove\t移除模组\t将元数据移到可恢复的 runtime 目录' \
+      $'check\t刷新并校验\t更新 Packwiz 索引并执行规则检查' \
+      $'client_build\t构建客户端包\t创建并验证当前 .mrpack' \
+      $'__back\t返回\t返回状态总览')"
+    case "$selected" in
+    list) run_menu_command "当前模组" command_mod list ;;
+    add)
+      source="$(prompt_value 'Modrinth slug 或模组 URL：')" || { menu_cancelled; continue; }
+      if confirm_yes "要将 '$source' 添加为本地候选吗？"; then
+        run_menu_command "添加候选模组" command_mod add "$source"
+      else menu_cancelled; fi
+      ;;
+    update_check) run_menu_command "检查模组更新" command_mod update-check ;;
+    update_one)
+      slug="$(select_mod_slug)" || { menu_cancelled; continue; }
+      if confirm_yes "要把 $slug 更新为本地候选吗？"; then
+        run_menu_command "更新 $slug" command_mod update "$slug"
+      else menu_cancelled; fi
+      ;;
+    update_all)
+      if confirm_yes "要更新所有存在有效候选版本的模组吗？"; then
+        run_menu_command "更新全部模组" command_mod update all
+      else menu_cancelled; fi
+      ;;
+    side)
+      slug="$(select_mod_slug)" || { menu_cancelled; continue; }
+      side="$(menu_select "选择 $slug 的安装侧" \
+        $'client\t仅客户端\t只安装到玩家整合包' \
+        $'server\t仅服务端\t只安装到服务器' \
+        $'both\t客户端与服务端\t双方都安装' \
+        $'__back\t返回\t取消操作')"
+      [[ "$side" != "__back" ]] || continue
+      if confirm_yes "要将 $slug 的安装侧设为 $side 吗？"; then
+        run_menu_command "修改 $slug 安装侧" command_mod side "$slug" "$side"
+      else menu_cancelled; fi
+      ;;
+    remove)
+      slug="$(select_mod_slug)" || { menu_cancelled; continue; }
+      if confirm_yes "要从候选整合包移除 $slug 吗？元数据仍可恢复。"; then
+        run_menu_command "移除 $slug" command_mod remove "$slug"
+      else menu_cancelled; fi
+      ;;
+    check) run_menu_command "刷新并校验整合包" command_mod check ;;
+    client_build) run_menu_command "构建客户端整合包" command_client build ;;
+    __back) return 0 ;;
+    esac
+  done
+}
+
+menu_release() {
+  local selected release_type
+  while true; do
+    selected="$(menu_select '测试服与发布' \
+      $'stage_start\t启动全新测试服\t备份正式服并恢复副本用于测试' \
+      $'stage_logs\t跟随测试服日志\t检查启动和模组行为' \
+      $'stage_accept\t接受已测试整合包\t记录健康测试服对应的清单哈希' \
+      $'stage_stop\t停止测试服\t停止隔离服务器和清单服务' \
+      $'publish_small\t发布小更新\t现有玩家按照更新说明手工操作' \
+      $'publish_full\t发布完整更新\t玩家需要重新导入客户端整合包' \
+      $'__back\t返回\t返回状态总览')"
+    case "$selected" in
+    stage_start)
+      if confirm_yes "要从最新正式服备份创建全新测试副本吗？"; then
+        run_menu_command "启动测试服" command_stage start
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    stage_logs) run_menu_command "测试服日志" command_stage logs ;;
+    stage_accept)
+      if confirm_yes "确认你已经测试当前健康的测试服吗？"; then
+        run_menu_command "接受测试服整合包" command_stage accept
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    stage_stop)
+      if confirm_yes "要停止隔离测试服务吗？"; then
+        run_menu_command "停止测试服" command_stage stop
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    publish_small|publish_full)
+      release_type="${selected#publish_}"
+      printf '\n此操作会从 main 发布、提交整合包与发布元数据，并推送到 origin。\n' >&2
+      if confirm_phrase "PUBLISH $release_type"; then
+        run_menu_command "发布 $release_type 更新" command_mod publish "$release_type"
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    __back) return 0 ;;
+    esac
+  done
+}
+
+menu_world_backup() {
+  local selected mode seed world_name backup_id phrase menu_title
+  while true; do
+    collect_backup_stats
+    menu_title="世界与备份 · local ${BACKUP_LOCAL_COUNT} 个/$(format_bytes "$BACKUP_LOCAL_BYTES") · offline ${BACKUP_OFFLINE_COUNT} 个/$(format_bytes "$BACKUP_OFFLINE_BYTES") · 总计 $(format_bytes "$BACKUP_TOTAL_BYTES")"
+    selected="$(menu_select "$menu_title" \
+      $'world_status\t世界状态\t显示路径、大小、种子设置和归档' \
+      $'world_reset\t重置世界\t归档当前世界并配置新种子' \
+      $'backup_create\t创建备份\t在线协调备份或停服快照' \
+      $'backup_list\t列出备份\t显示 local、offline 和总占用' \
+      $'restore_test\t测试备份\t解压到隔离的 runtime/restore-test' \
+      $'restore\t恢复正式服\t可恢复地替换已停止的正式服数据' \
+      $'backup_delete\t删除备份\t使用 Y/N 确认并永久删除一个本机归档' \
+      $'__back\t返回\t返回状态总览')"
+    case "$selected" in
+    world_status) run_menu_command "世界状态" command_world status ;;
+    world_reset)
+      mode="$(menu_select '选择下一个世界的种子' \
+        $'random\t随机种子\t清空 WORLD_SEED 以随机生成' \
+        $'seed\t指定种子\t输入一个有符号 64 位整数' \
+        $'__back\t返回\t取消操作')"
+      [[ "$mode" != "__back" ]] || continue
+      if [[ "$mode" == "seed" ]]; then
+        seed="$(prompt_value '有符号 64 位种子：')" || { menu_cancelled; continue; }
+        if ! validate_world_seed "$seed" >/dev/null 2>&1; then
+          warn "Minecraft 种子不是有效的有符号 64 位整数。"
+          menu_pause
+          continue
+        fi
+      else
+        seed="随机"
+      fi
+      load_settings || { warn "无法加载 .env。"; menu_pause; continue; }
+      world_name="${WORLD_NAME:-world}"
+      phrase="RESET $world_name"
+      printf '\n目标世界：%s\n新种子：%s\n正式服和测试服必须停止；操作前会先创建完整快照。\n' \
+        "$world_name" "$seed" >&2
+      if ! confirm_phrase "$phrase"; then menu_cancelled; continue; fi
+      if [[ "$mode" == "seed" ]]; then
+        run_menu_command "重置世界 $world_name" command_world reset --seed "$seed" --confirm
+      else
+        run_menu_command "重置世界 $world_name" command_world reset --random --confirm
+      fi
+      [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      ;;
+    backup_create) run_menu_command "创建备份" command_backup ;;
+    backup_list) run_menu_command "本机备份归档" command_backup_list ;;
+    restore_test)
+      backup_id="$(select_backup_id)" || continue
+      run_menu_command "测试恢复 $backup_id" command_restore_test "$backup_id"
+      ;;
+    restore)
+      backup_id="$(select_backup_id)" || continue
+      printf '\n正式服必须停止；现有数据会保留为 data.pre-restore.*。\n' >&2
+      if confirm_phrase "RESTORE $backup_id"; then
+        run_menu_command "从 $backup_id 恢复正式服" command_restore "$backup_id" --confirm
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+      else menu_cancelled; fi
+      ;;
+    backup_delete)
+      backup_id="$(select_backup_id)" || continue
+      printf '\n这会永久删除一个本机归档，不影响远端 restic 快照。\n' >&2
+      if confirm_yes "确认删除 $backup_id 吗？"; then
+        run_menu_command "删除备份 $backup_id" command_backup_delete "$backup_id" --confirm
+      else menu_cancelled; fi
+      ;;
+    __back) return 0 ;;
+    esac
+  done
+}
+
+menu_settings() {
+  local selected
+  while true; do
+    selected="$(menu_select '设置与诊断' \
+      $'init\t初始化本机文件\t创建缺少的 .env、密钥和 runtime 目录' \
+      $'edit\t编辑 .env\t使用 VISUAL、EDITOR 或 nano，保存后校验' \
+      $'doctor\t运行诊断\t检查依赖、设置、密钥、Docker 和发布元数据' \
+      $'help\t完整命令参考\t显示高级非交互命令' \
+      $'__back\t返回\t返回状态总览')"
+    case "$selected" in
+    init) run_menu_command "初始化本机文件" command_init ;;
+    edit) run_menu_command "编辑本机配置" menu_edit_env ;;
+    doctor) run_menu_command "环境诊断" command_doctor ;;
+    help) run_menu_command "高级命令参考" usage_all ;;
+    __back) return 0 ;;
+    esac
+  done
+}
+
+menu_recommended() {
+  case "$DASH_RECOMMENDED_ID" in
+    setup) run_menu_command "初始化并编辑本机配置" menu_edit_env ;;
+    doctor) run_menu_command "环境诊断" command_doctor ;;
+    start)
+      if confirm_yes "要启动正式服务器吗？"; then
+        run_menu_command "启动正式服务器" command_start
+      else menu_cancelled; fi
+      ;;
+    server_status) run_menu_command "正式服务器详情" command_status ;;
+    stage_start)
+      if confirm_yes "要为候选整合包创建全新测试副本吗？"; then
+        run_menu_command "启动测试服" command_stage start
+      else menu_cancelled; fi
+      ;;
+    stage_accept)
+      if confirm_yes "确认当前健康的测试服已经过测试吗？"; then
+        run_menu_command "接受测试服整合包" command_stage accept
+      else menu_cancelled; fi
+      ;;
+    stage_logs) run_menu_command "测试服日志" command_stage logs ;;
+    publish) menu_release ;;
+  esac
+}
+
+command_menu() {
+  MENU_PLAIN=false
+  MENU_FZF=false
+  case "${1:-}" in
+    "") ;;
+    --plain) MENU_PLAIN=true ;;
+    *) die "用法：./mcctl menu [--plain]" ;;
+  esac
+  if [[ "$MENU_PLAIN" == true ]]; then
+    MENU_FZF=false
+  elif [[ ! -t 0 || ! -t 1 ]] || ! command -v fzf >/dev/null 2>&1; then
+    MENU_PLAIN=true
+  else
+    MENU_FZF=true
+  fi
+
+  local selected
+  while true; do
+    dashboard_collect
+    dashboard_render
+    selected="$(menu_select '主菜单' \
+      "recommended"$'\t'"★ 建议：$DASH_RECOMMENDED_LABEL"$'\t'"根据当前本机状态生成" \
+      $'server\t正式服务器\t启动、停止、状态、日志、控制台和 RCON' \
+      $'players\t玩家与权限\t在线玩家、白名单、OP 与撤销 OP' \
+      $'mods\t模组与客户端包\t添加、更新、移除、校验和构建' \
+      $'release\t测试服与发布\t测试、接受并发布整合包变更' \
+      $'world_backup\t世界与备份\t检查、重置、备份、恢复和删除' \
+      $'settings\t设置与诊断\t初始化、编辑 .env、诊断和帮助' \
+      $'refresh\t刷新状态\t重新检测当前状态' \
+      $'quit\t退出\t不做任何更改并离开 mcctl')"
+    case "$selected" in
+      recommended) menu_recommended ;;
+      server) menu_server ;;
+      players) menu_players ;;
+      mods) menu_mods ;;
+      release) menu_release ;;
+      world_backup) menu_world_backup ;;
+      settings) menu_settings ;;
+      refresh) continue ;;
+      quit|__back) break ;;
+    esac
+  done
+}
+
 main() {
   local command="${1:-}"
   shift || true
+  if [[ -z "$command" ]]; then
+    if [[ -t 0 && -t 1 ]]; then
+      command_menu
+    else
+      usage
+    fi
+    return 0
+  fi
   case "$command" in
+    menu) command_menu "$@" ;;
+    doctor) [[ $# -eq 0 ]] || die "Usage: ./mcctl doctor"; command_doctor ;;
     init) command_init "$@" ;;
     start) command_start "$@" ;;
     stop) command_stop "$@" ;;
-    restart) command_stop "$@"; command_start ;;
-    status) load_settings; command_status "$@" ;;
-    logs) load_settings; docker_ready; compose logs -f minecraft ;;
-    console)
-      load_settings; docker_ready
-      [[ -t 0 && -t 1 ]] || die "The Minecraft console requires an interactive WSL terminal."
-      service_running minecraft || die "The production server is not running."
-      local container_id attach_status
-      container_id="$(compose ps --status running -q minecraft)"
-      [[ -n "$container_id" ]] || die "The production server container could not be located."
-      printf '\nConnected to the production Minecraft console.\n'
-      printf 'The console has no prompt; type a command and press Enter. Do not include the leading /.\n'
-      printf 'Detach with Ctrl-P, then Ctrl-Q. Ctrl+C is not sent to the Minecraft process.\n\n'
-      if docker attach --sig-proxy=false "$container_id"; then
-        attach_status=0
-      else
-        attach_status=$?
-      fi
-      if service_running minecraft; then
-        info "Console detached; the production server is still running."
-      else
-        warn "Console ended because the production server is no longer running."
-      fi
-      return "$attach_status"
-      ;;
-    rcon)
-      [[ $# -ge 1 ]] || die "Usage: ./mcctl rcon <command...>"
-      load_settings; docker_ready; compose exec -T minecraft rcon-cli "$*"
-      ;;
-    whitelist)
-      load_settings; docker_ready
-      case "${1:-}" in
-        add|remove) [[ $# -eq 2 ]] || die "Usage: ./mcctl whitelist add|remove <player>"; compose exec -T minecraft rcon-cli "whitelist $1 $2" ;;
-        list) compose exec -T minecraft rcon-cli 'whitelist list' ;;
-        *) die "Usage: ./mcctl whitelist add|remove|list [player]" ;;
-      esac
-      ;;
+    restart) command_restart "$@" ;;
+    status) command_status "$@" ;;
+    logs) command_production_logs "$@" ;;
+    console) command_console "$@" ;;
+    rcon) run_rcon_command "$@" ;;
+    whitelist) run_whitelist_command "$@" ;;
     mod) command_mod "$@" ;;
     world) command_world "$@" ;;
     stage) command_stage "$@" ;;
     backup) command_backup "$@" ;;
-    backup-list) command_backup_list ;;
+    backup-list) [[ $# -eq 0 ]] || die "Usage: ./mcctl backup-list"; command_backup_list ;;
     backup-delete) command_backup_delete "$@" ;;
     restore-test) command_restore_test "$@" ;;
     restore) command_restore "$@" ;;
     client) command_client "$@" ;;
-    help|-h|--help|"") usage ;;
+    help)
+      case "${1:-}" in
+        "") usage ;;
+        --all) [[ $# -eq 1 ]] || die "Usage: ./mcctl help [--all]"; usage_all ;;
+        *) die "Usage: ./mcctl help [--all]" ;;
+      esac
+      ;;
+    -h|--help) [[ $# -eq 0 ]] || die "Usage: ./mcctl help [--all]"; usage ;;
     *) die "Unknown command: $command. Run './mcctl help'." ;;
   esac
 }

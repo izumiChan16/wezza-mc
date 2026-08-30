@@ -21,9 +21,11 @@ class BackupCommandTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def archive(self, location: str, name: str = "fixture.tar.zst") -> Path:
+    def archive(
+        self, location: str, name: str = "fixture.tar.zst", size: int = 7
+    ) -> Path:
         target = self.root / "runtime" / "backups" / location / name
-        target.write_bytes(b"fixture")
+        target.write_bytes(b"x" * size)
         return target
 
     def run_mcctl(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -68,6 +70,17 @@ class BackupCommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("local", result.stdout)
         self.assertIn("offline", result.stdout)
+
+    def test_backup_list_reports_category_and_total_usage(self) -> None:
+        self.archive("local", "local-size.tar.zst", size=1024)
+        self.archive("offline", "offline-size.tar.zst", size=2048)
+        result = self.run_mcctl("backup-list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"local\s+1 archive\(s\)\s+1\.0 KiB")
+        self.assertRegex(result.stdout, r"offline\s+1 archive\(s\)\s+2\.0 KiB")
+        self.assertRegex(result.stdout, r"total\s+2 archive\(s\)\s+3\.0 KiB")
+        self.assertIn("1.0 KiB  local-size.tar.zst", result.stdout)
+        self.assertIn("2.0 KiB  offline-size.tar.zst", result.stdout)
 
 
 if __name__ == "__main__":
