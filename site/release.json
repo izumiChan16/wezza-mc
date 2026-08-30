@@ -1,32 +1,32 @@
 {
   "schema": 1,
-  "pack_version": "26.1.2-r5",
-  "previous_pack_version": "26.1.2-r4",
+  "pack_version": "26.1.2-r6",
+  "previous_pack_version": "26.1.2-r5",
   "minecraft": "26.1.2",
   "fabric_loader": "0.19.3",
   "release_type": "small",
   "requires_reimport": false,
-  "published_at": "2026-08-30T14:41:22+00:00",
+  "published_at": "2026-08-30T15:02:08+00:00",
   "changes": [
     {
-      "action": "added",
-      "player_operation": "added",
-      "metadata": "mods/veinminer.pw.toml",
-      "name": "VeinMiner",
-      "side": "both",
-      "player_action": true,
-      "old": null,
-      "new": {
-        "name": "VeinMiner",
-        "filename": "veinminer-fabric-2.10.3.jar",
-        "side": "both",
+      "action": "removed",
+      "player_operation": null,
+      "metadata": "mods/spark.pw.toml",
+      "name": "spark",
+      "side": "server",
+      "player_action": false,
+      "old": {
+        "name": "spark",
+        "filename": "spark-1.10.173-fabric.jar",
+        "side": "server",
         "source": "modrinth",
-        "download_url": "https://cdn.modrinth.com/data/OhduvhIc/versions/h4Z7xAL0/veinminer-fabric-2.10.3.jar",
+        "download_url": "https://cdn.modrinth.com/data/l6YH9Als/versions/iYFOl6lQ/spark-1.10.173-fabric.jar",
         "hash_format": "sha512",
-        "hash": "c464ca89a8cec32892d57e701c9d1d16b5bb2b7c0a989ba9671d72b8d8f0d1279ead59542b7334cf1c7024a711784080c08c16bfa25b9dd7a16c5dddde27e1c5",
-        "project_url": "https://modrinth.com/mod/OhduvhIc",
-        "version_url": "https://modrinth.com/mod/OhduvhIc/version/h4Z7xAL0"
-      }
+        "hash": "1dcbf2b76ceacf07523afaeaf63d3625b0318077cc6ce588bb701aea4a494bc2a5179fd2ca5aeda9513c6a2248c2ec590387e8aec6ac9fd8e3d01760bbc3dbfb",
+        "project_url": "https://modrinth.com/mod/l6YH9Als",
+        "version_url": "https://modrinth.com/mod/l6YH9Als/version/iYFOl6lQ"
+      },
+      "new": null
     }
   ]
 }

@@ -136,11 +136,6 @@ hash = "274b895e9b4c59beba5f4774a33570c04e939d0bd6e38d349e8ac6fd5cf098d1"
 metafile = true
 
 [[files]]
-file = "mods/spark.pw.toml"
-hash = "0b8ddbfcfb2aa053d0317e7145d60e00485e4ae6c5ef75a9ec9ce0b533137e18"
-metafile = true
-
-[[files]]
 file = "mods/time-in-a-bottle.pw.toml"
 hash = "86e2ed135aef31a2fe2f6c6457fc2c955249584c5203074f3f36b98236de1678"
 metafile = true
