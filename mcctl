@@ -8,6 +8,7 @@ LOCAL_BACKUP_DIR="${ROOT_DIR}/runtime/backups/local"
 OFFLINE_BACKUP_DIR="${ROOT_DIR}/runtime/backups/offline"
 STAGING_DIR="${ROOT_DIR}/runtime/staging"
 ACCEPTED_FILE="${STAGING_DIR}/ACCEPTED_PACK_SHA256"
+STAGING_ERROR_FILE="${STAGING_DIR}/LAST_ERROR.log"
 RELEASE_FILE="${ROOT_DIR}/site/release.json"
 STAGING_SESSION_TOOL="${ROOT_DIR}/tools/staging_session.py"
 
@@ -71,6 +72,7 @@ Staging:
   stage rebuild                Rebuild it after pack changes, reusing its backup
   stage stop                   Pause the isolated test server
   stage logs                   Follow staging logs
+  stage error                  Show the most recent staging startup failure
   stage finish --delete-backup|--keep-backup --confirm
                                Accept, stop, and clean the completed test session
   stage discard --confirm      End a failed test and keep its backup and pack changes
@@ -342,6 +344,35 @@ validate_staging_session_backup() {
   archive="$(resolve_backup "$SESSION_BACKUP_ID")"
   tar -tf "$archive" >/dev/null \
     || die "The staging backup cannot be read: $SESSION_BACKUP_ID"
+}
+
+staging_start_services() {
+  mkdir -p "$STAGING_DIR"
+  local temporary status
+  temporary="$(mktemp "${STAGING_DIR}/.LAST_ERROR.XXXXXX")"
+  if (
+    set +e
+    compose --profile staging up -d --force-recreate \
+      pack-server minecraft-staging 2>&1 | tee "$temporary"
+    local -a pipeline_status=("${PIPESTATUS[@]}")
+    (( pipeline_status[0] == 0 )) || exit "${pipeline_status[0]}"
+    exit "${pipeline_status[1]}"
+  ); then
+    rm -f -- "$temporary" "$STAGING_ERROR_FILE"
+    return 0
+  else
+    status=$?
+    mv -f -- "$temporary" "$STAGING_ERROR_FILE"
+    warn "测试服启动失败，但本次会话、测试副本和专用备份都已保留。"
+    warn "返回“维护整合包”后可查看失败详情，并修复后重试；不会重复备份。"
+    return "$status"
+  fi
+}
+
+staging_show_last_error() {
+  [[ -s "$STAGING_ERROR_FILE" ]] || die "No saved staging startup error."
+  printf 'Most recent staging startup failure:\n\n'
+  tail -n 200 "$STAGING_ERROR_FILE"
 }
 
 resolve_backup() {
@@ -824,6 +855,11 @@ command_mod() {
 command_stage() {
   local action="${1:-start}"
   (( $# == 0 )) || shift
+  if [[ "$action" == "error" ]]; then
+    [[ $# -eq 0 ]] || die "Usage: ./mcctl stage error"
+    staging_show_last_error
+    return 0
+  fi
   load_settings
   ensure_initialized
   docker_ready
@@ -865,7 +901,7 @@ command_stage() {
       staging_session_record "$(pack_sha256)" "$backup_status" "$backup_id"
       restore_staging_session_data
       rm -f -- "$ACCEPTED_FILE"
-      compose --profile staging up -d pack-server minecraft-staging
+      staging_start_services || return 1
       info "Staging session started at 127.0.0.1:${STAGING_PORT:-25566}."
       if [[ "$backup_status" == tracked ]]; then
         info "Tracked test backup: $backup_id"
@@ -880,7 +916,7 @@ command_stage() {
         || die "Pack changed during testing. Run './mcctl stage rebuild'."
       [[ -d "${STAGING_DIR}/data" ]] \
         || die "Staging data is missing. Run './mcctl stage rebuild'."
-      compose --profile staging up -d pack-server minecraft-staging
+      staging_start_services || return 1
       info "Resumed the existing staging session without creating another backup."
       ;;
     rebuild)
@@ -895,7 +931,7 @@ command_stage() {
       rebuilt_sha="$(pack_sha256)"
       python3 "$STAGING_SESSION_TOOL" update-pack --root "$ROOT_DIR" --pack-sha "$rebuilt_sha"
       rm -f -- "$ACCEPTED_FILE"
-      compose --profile staging up -d pack-server minecraft-staging
+      staging_start_services || return 1
       info "Rebuilt staging from the original session backup without creating a new backup."
       ;;
     stop)
@@ -961,6 +997,7 @@ command_stage() {
         fi
       fi
       python3 "$STAGING_SESSION_TOOL" clear --root "$ROOT_DIR"
+      rm -f -- "$STAGING_ERROR_FILE"
       info "Accepted the pack, stopped staging, and cleaned all staging world copies."
       (( delete_status == 0 || delete_status == 2 )) || return "$delete_status"
       ;;
@@ -973,6 +1010,7 @@ command_stage() {
       python3 "$STAGING_SESSION_TOOL" cleanup-data --root "$ROOT_DIR"
       rm -f -- "$ACCEPTED_FILE"
       python3 "$STAGING_SESSION_TOOL" clear --root "$ROOT_DIR"
+      rm -f -- "$STAGING_ERROR_FILE"
       info "Discarded staging data and kept candidate pack changes."
       [[ -z "$kept_backup" ]] || info "Kept the test backup: $kept_backup"
       ;;
@@ -983,6 +1021,7 @@ command_stage() {
         && die "An active staging session exists. Finish or discard it instead."
       compose --profile staging stop -t 120 minecraft-staging pack-server
       python3 "$STAGING_SESSION_TOOL" cleanup-data --root "$ROOT_DIR"
+      rm -f -- "$STAGING_ERROR_FILE"
       info "Cleaned legacy staging world copies; acceptance records were preserved."
       ;;
     *) die "Unknown stage action: $action" ;;
@@ -1255,6 +1294,7 @@ run_menu_command() {
   if [[ "$status" -eq 0 && "$pause_on_success" == false ]]; then
     MENU_NOTICE="✓ $title 完成"
   elif [[ "$status" -ne 130 ]]; then
+    MENU_NOTICE="✗ $title 失败；详情保留在当前任务"
     menu_pause
   fi
   return 0
@@ -1285,6 +1325,7 @@ dashboard_collect() {
   DASH_SESSION_PACK_SHA=""
   DASH_SESSION_BACKUP_STATUS=""
   DASH_SESSION_BACKUP_ID=""
+  DASH_STAGING_ERROR=false
   DASH_WORKFLOW="无待处理变更"
   DASH_PRODUCTION_ADDRESS="${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
 
@@ -1365,13 +1406,18 @@ dashboard_collect() {
       DASH_STAGING_USAGE="$(format_bytes "$STAGING_DATA_BYTES")"
     fi
   fi
+  if [[ -s "$STAGING_ERROR_FILE" && "$DASH_STAGING" != "healthy" ]]; then
+    DASH_STAGING_ERROR=true
+  fi
 
   collect_backup_stats
   DASH_BACKUP_USAGE="${BACKUP_TOTAL_COUNT} 个 · $(format_bytes "$BACKUP_TOTAL_BYTES")"
 
   if [[ "$DASH_SESSION_STATE" == "active" ]]; then
-    if [[ -z "$current_hash" || "$DASH_SESSION_PACK_SHA" != "$current_hash" ]]; then
-      DASH_WORKFLOW="测试内容已变化，需重建"
+    if [[ "$DASH_STAGING_ERROR" == true ]]; then
+      DASH_WORKFLOW="测试服启动失败，可查看详情并重试"
+    elif [[ -z "$current_hash" || "$DASH_SESSION_PACK_SHA" != "$current_hash" ]]; then
+      DASH_WORKFLOW="测试内容已变化或启动未完成，需重建"
     elif [[ "$DASH_STAGING" == "healthy" ]]; then
       DASH_WORKFLOW="测试中，可以验收"
     elif [[ "$DASH_STAGING" == "running" || "$DASH_STAGING" == "starting" \
@@ -1826,9 +1872,14 @@ menu_pack_workflow() {
 
     if [[ "$DASH_SESSION_STATE" == "active" ]]; then
       current_sha="$(pack_sha256 2>/dev/null || true)"
-      if [[ -z "$current_sha" || "$DASH_SESSION_PACK_SHA" != "$current_sha" ]]; then
+      if [[ "$DASH_STAGING_ERROR" == true ]]; then
         entries+=(
-          $'rebuild\t用最新变更重建测试服\t沿用本次备份，不再重复备份正式服'
+          $'retry\t修复后重试启动测试服\t重建容器挂载并沿用本次备份，不重复备份'
+          $'last_error\t查看上次失败详情\t显示被保存的 Docker 启动错误'
+        )
+      elif [[ -z "$current_sha" || "$DASH_SESSION_PACK_SHA" != "$current_sha" ]]; then
+        entries+=(
+          $'rebuild\t重新建立并启动测试服\t修复未完成的启动或应用最新变更；沿用本次备份'
         )
       elif [[ "$DASH_STAGING" == "healthy" ]]; then
         entries+=(
@@ -1885,6 +1936,11 @@ menu_pack_workflow() {
         run_menu_command "重建测试服" command_stage rebuild
         [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
         ;;
+      retry)
+        run_menu_command "修复并重试测试服" command_stage rebuild
+        [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
+        ;;
+      last_error) run_menu_command --read "上次测试服失败详情" command_stage error ;;
       logs) run_menu_command --read "测试服日志" command_stage logs ;;
       pause)
         run_menu_command "暂停测试服" command_stage stop

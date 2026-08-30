@@ -119,7 +119,7 @@ services:
       HOME: /tmp/packwiz
       XDG_CACHE_HOME: /tmp/packwiz/cache
       XDG_CONFIG_HOME: /tmp/packwiz/config
-    command: ["serve", "--refresh", "--port", "8080"]
+    command: ["serve", "--port", "8080"]
     expose:
       - "8080"
     volumes:

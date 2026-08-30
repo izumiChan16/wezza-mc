@@ -57,6 +57,11 @@ class StagingCommandTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "if [[ $1 == info ]]; then exit 0; fi\n"
             "if [[ $1 == inspect ]]; then printf 'healthy\\n'; exit 0; fi\n"
+            "if [[ $1 == compose && $* == *'up -d --force-recreate pack-server minecraft-staging'* "
+            "&& ${FAKE_STAGING_FAIL:-false} == true ]]; then\n"
+            "  printf 'OCI runtime create failed: stale WSL bind mount\\n' >&2\n"
+            "  exit 17\n"
+            "fi\n"
             "if [[ $1 == compose && $* == *'ps --status running --services'* ]]; then\n"
             "  [[ ${FAKE_PRODUCTION_RUNNING:-false} == true ]] && printf 'minecraft\\n'\n"
             "  [[ ${FAKE_STAGING_RUNNING:-false} == true ]] && printf 'minecraft-staging\\n'\n"
@@ -79,10 +84,12 @@ class StagingCommandTests(unittest.TestCase):
         self,
         *args: str,
         staging_running: bool = False,
+        staging_fail: bool = False,
         menu_input: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = self.env.copy()
         env["FAKE_STAGING_RUNNING"] = "true" if staging_running else "false"
+        env["FAKE_STAGING_FAIL"] = "true" if staging_fail else "false"
         env["MCCTL_MENU_NO_PAUSE"] = "true"
         return subprocess.run(
             [str(self.root / "mcctl"), *args],
@@ -153,6 +160,33 @@ class StagingCommandTests(unittest.TestCase):
         self.assertTrue((self.root / "pack" / "candidate.txt").is_file())
         self.assertFalse((self.root / "runtime" / "staging" / "data").exists())
         self.assertFalse((self.root / "runtime" / "staging" / "SESSION").exists())
+
+    def test_startup_failure_is_persisted_and_retries_without_another_backup(self) -> None:
+        result = self.run_mcctl("stage", "start", staging_fail=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("本次会话、测试副本和专用备份都已保留", result.stderr)
+        self.assertEqual(len(self.offline_backups()), 1)
+        error_file = self.root / "runtime" / "staging" / "LAST_ERROR.log"
+        self.assertTrue(error_file.is_file())
+        self.assertIn("stale WSL bind mount", error_file.read_text(encoding="utf-8"))
+        self.assertTrue((self.root / "runtime" / "staging" / "SESSION").is_file())
+
+        result = self.run_mcctl("stage", "error")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("stale WSL bind mount", result.stdout)
+
+        result = self.run_mcctl(
+            "menu", "--plain", menu_input="3\nq\nq\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("测试服启动失败，可查看详情并重试", result.stdout)
+        self.assertIn("修复后重试启动测试服", result.stderr)
+        self.assertIn("查看上次失败详情", result.stderr)
+
+        result = self.run_mcctl("stage", "rebuild")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.offline_backups()), 1)
+        self.assertFalse(error_file.exists())
 
 
 if __name__ == "__main__":

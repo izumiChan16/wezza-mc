@@ -744,7 +744,9 @@ git diff -- pack
 3. 备份身份、清单哈希和开始时间记录在 `runtime/staging/SESSION`。
 4. 备份恢复到隔离的 `runtime/staging/data/`，然后启动测试服。
 
-同一会话内暂停、继续或因模组变化重建测试服都不会再次备份正式服。面板发现测试期间 `pack/` 变化后会显示“用最新变更重建测试服”；重建前先校验新清单和原备份，再从最初的备份恢复干净副本。
+同一会话内暂停、继续或因模组变化重建测试服都不会再次备份正式服。面板发现测试期间 `pack/` 变化或上次启动未完成后会显示“重新建立并启动测试服”；重建前先校验新清单和原备份，再从最初的备份恢复干净副本。
+
+测试服务每次启动都会重新创建 staging 容器，以更新 Docker Desktop 为 WSL bind mount 建立的内部路径。Packwiz 清单已经在启动前刷新，`pack-server` 启动时不会再做第二次 refresh，避免失败途中改变会话哈希。
 
 高级命令对应为：
 
@@ -756,6 +758,13 @@ git diff -- pack
 ```
 
 `stage start` 只允许建立全新会话。已有会话必须继续、完成或结束；存在旧版遗留测试数据时也会拒绝，防止无意间继续堆积世界副本。
+
+如果容器启动失败，已经创建的会话、测试世界和专用备份都会保留，错误输出写入 `runtime/staging/LAST_ERROR.log`。维护页会持续显示“测试服启动失败”，并提供“查看上次失败详情”和“修复后重试启动测试服”；重试沿用原备份。高级命令为：
+
+```bash
+./mcctl stage error
+./mcctl stage rebuild
+```
 
 ### 8.2 连接与日志
 
@@ -1601,7 +1610,9 @@ docker compose logs --tail 200 minecraft
 ./mcctl status
 ```
 
-如果清单有变化，维护页会显示“用最新变更重建测试服”；如果服务不健康，先看日志。不要手工伪造 `SESSION` 或 `ACCEPTED_PACK_SHA256`。
+如果清单有变化，维护页会显示“重新建立并启动测试服”；如果服务不健康，先看日志。不要手工伪造 `SESSION` 或 `ACCEPTED_PACK_SHA256`。
+
+如果出现 `OCI runtime create failed`、`docker-desktop-bind-mounts` 或挂载 `/data` 时 `no such file or directory`，这是 Docker Desktop 与 WSL 之间的旧 bind mount 已失效，不代表世界恢复失败。返回“维护整合包”，先查看已保存的失败详情，再选择“修复后重试启动测试服”。重试会强制重建 staging 容器，但保留并复用本次测试备份，不应选择“结束本次测试”。若重试仍失败，重启 Docker Desktop 后再次执行同一重试动作。
 
 ### 19.5 发布提示没有接受记录
 
@@ -1818,6 +1829,7 @@ gh run view <运行编号> --log-failed
 | `./mcctl stage resume` | 继续现有测试会话，不重复备份 |
 | `./mcctl stage rebuild` | 用最新候选清单和原备份重建测试服 |
 | `./mcctl stage logs` | 跟随测试服日志 |
+| `./mcctl stage error` | 查看最近一次被保存的测试服启动错误 |
 | `./mcctl stage stop` | 暂停测试服并保留会话 |
 | `./mcctl stage finish --delete-backup --confirm` | 验收、停服、清理副本并删除可确认的专用备份 |
 | `./mcctl stage finish --keep-backup --confirm` | 验收并清理测试副本，但保留备份 |
