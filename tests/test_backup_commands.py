@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -28,13 +30,19 @@ class BackupCommandTests(unittest.TestCase):
         target.write_bytes(b"x" * size)
         return target
 
-    def run_mcctl(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_mcctl(
+        self, *args: str, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [str(self.root / "mcctl"), *args],
             cwd=self.root,
             check=False,
             capture_output=True,
             text=True,
+            env=env,
         )
 
     def test_delete_requires_confirmation(self) -> None:
@@ -81,6 +89,53 @@ class BackupCommandTests(unittest.TestCase):
         self.assertRegex(result.stdout, r"total\s+2 archive\(s\)\s+3\.0 KiB")
         self.assertIn("1.0 KiB  local-size.tar.zst", result.stdout)
         self.assertIn("2.0 KiB  offline-size.tar.zst", result.stdout)
+
+    def test_restore_records_provenance_and_removes_stale_containers(self) -> None:
+        data_world = self.root / "runtime" / "data" / "world"
+        data_world.mkdir(parents=True)
+        (data_world / "level.dat").write_bytes(b"old-world")
+
+        source = self.root / "archive-source"
+        source_world = source / "world"
+        source_world.mkdir(parents=True)
+        (source_world / "level.dat").write_bytes(b"restored-world")
+        archive = self.root / "runtime" / "backups" / "offline" / "recovery.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            handle.add(source, arcname=".")
+
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        docker_log = self.root / "docker.log"
+        fake_docker = fake_bin / "docker"
+        fake_docker.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ $1 == info ]]; then exit 0; fi\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n",
+            encoding="utf-8",
+        )
+        fake_docker.chmod(0o755)
+
+        result = self.run_mcctl(
+            "restore",
+            "offline/recovery.tar.gz",
+            "--confirm",
+            extra_env={
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FAKE_DOCKER_LOG": str(docker_log),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            (self.root / "runtime" / "data" / "world" / "level.dat").read_bytes(),
+            b"restored-world",
+        )
+        self.assertEqual(
+            len(list((self.root / "runtime").glob("data.pre-restore.*"))), 1
+        )
+        records = list((self.root / "runtime" / "restore-history").glob("restore-*.txt"))
+        self.assertEqual(len(records), 1)
+        self.assertIn("archive_id=offline/recovery.tar.gz", records[0].read_text())
+        self.assertIn("rm -sf minecraft backup-local", docker_log.read_text())
 
 
 if __name__ == "__main__":

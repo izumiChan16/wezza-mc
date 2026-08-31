@@ -7,10 +7,12 @@ DATA_DIR="${ROOT_DIR}/runtime/data"
 LOCAL_BACKUP_DIR="${ROOT_DIR}/runtime/backups/local"
 OFFLINE_BACKUP_DIR="${ROOT_DIR}/runtime/backups/offline"
 STAGING_DIR="${ROOT_DIR}/runtime/staging"
+RESTORE_HISTORY_DIR="${ROOT_DIR}/runtime/restore-history"
 ACCEPTED_FILE="${STAGING_DIR}/ACCEPTED_PACK_SHA256"
 STAGING_ERROR_FILE="${STAGING_DIR}/LAST_ERROR.log"
 RELEASE_FILE="${ROOT_DIR}/site/release.json"
 STAGING_SESSION_TOOL="${ROOT_DIR}/tools/staging_session.py"
+DEPLOYMENT_RECORD_FILE="${DATA_DIR}/.mcctl-deployment"
 
 cd "$ROOT_DIR"
 
@@ -136,6 +138,88 @@ pack_sha256() {
     | xargs -0 sha256sum \
     | sha256sum \
     | awk '{print $1}'
+}
+
+pack_version() {
+  [[ -f "${ROOT_DIR}/pack/pack.toml" ]] || return 1
+  sed -nE 's/^version = "([^"]+)"$/\1/p' "${ROOT_DIR}/pack/pack.toml" | head -n 1
+}
+
+git_commit() {
+  git -C "$ROOT_DIR" rev-parse --verify HEAD 2>/dev/null
+}
+
+write_deployment_record() {
+  local temporary recorded_at version pack_hash commit
+  mkdir -p "$DATA_DIR"
+  temporary="$(mktemp "${DATA_DIR}/.mcctl-deployment.XXXXXX")"
+  recorded_at="$(date --iso-8601=seconds)"
+  version="$(pack_version 2>/dev/null || printf 'unknown')"
+  pack_hash="$(pack_sha256 2>/dev/null || printf 'unknown')"
+  commit="$(git_commit 2>/dev/null || printf 'unknown')"
+  {
+    printf 'schema=1\n'
+    printf 'recorded_at=%s\n' "$recorded_at"
+    printf 'pack_version=%s\n' "$version"
+    printf 'pack_sha256=%s\n' "$pack_hash"
+    printf 'git_commit=%s\n' "$commit"
+  } > "$temporary"
+  mv -f -- "$temporary" "$DEPLOYMENT_RECORD_FILE"
+}
+
+deployment_record_value() {
+  local key="$1" record_file="${2:-$DEPLOYMENT_RECORD_FILE}"
+  [[ -f "$record_file" ]] || return 1
+  sed -nE "s/^${key}=([^[:cntrl:]]*)$/\\1/p" "$record_file" | head -n 1
+}
+
+show_recovery_provenance() {
+  local latest_record
+  printf '\nDeployment record:\n'
+  if [[ -s "$DEPLOYMENT_RECORD_FILE" ]]; then
+    sed -nE 's/^(recorded_at|pack_version|pack_sha256|git_commit)=/  \1: /p' \
+      "$DEPLOYMENT_RECORD_FILE"
+  else
+    printf '  No deployment record has been written yet.\n'
+  fi
+
+  latest_record="$(find "$RESTORE_HISTORY_DIR" -maxdepth 1 -type f -name 'restore-*.txt' \
+    -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1 | cut -d' ' -f2-)"
+  [[ -n "$latest_record" ]] || return 0
+  printf '\nLatest recovery record:\n'
+  sed -nE 's/^(restored_at|archive_id|archive_sha256|previous_data_dir|restored_pack_version|restored_pack_sha256)=/  \1: /p' \
+    "$latest_record"
+}
+
+write_restore_record() {
+  local archive_id="$1" archive="$2" old_data="$3"
+  local temporary record recorded_at archive_hash archive_size restored_version restored_hash
+  mkdir -p "$RESTORE_HISTORY_DIR"
+  recorded_at="$(date --iso-8601=seconds)"
+  record="${RESTORE_HISTORY_DIR}/restore-$(date '+%Y%m%d-%H%M%S').txt"
+  while [[ -e "$record" ]]; do
+    record="${RESTORE_HISTORY_DIR}/restore-$(date '+%Y%m%d-%H%M%S')-$RANDOM.txt"
+  done
+  temporary="$(mktemp "${RESTORE_HISTORY_DIR}/.restore.XXXXXX")"
+  archive_hash="$(sha256sum "$archive" 2>/dev/null | awk '{print $1}' || true)"
+  [[ -n "$archive_hash" ]] || archive_hash=unknown
+  archive_size="$(stat -c '%s' "$archive" 2>/dev/null || true)"
+  [[ "$archive_size" =~ ^[0-9]+$ ]] || archive_size=unknown
+  restored_version="$(deployment_record_value pack_version "$DEPLOYMENT_RECORD_FILE" 2>/dev/null || printf 'unknown')"
+  restored_hash="$(deployment_record_value pack_sha256 "$DEPLOYMENT_RECORD_FILE" 2>/dev/null || printf 'unknown')"
+  {
+    printf 'schema=1\n'
+    printf 'restored_at=%s\n' "$recorded_at"
+    printf 'archive_id=%s\n' "$archive_id"
+    printf 'archive_path=%s\n' "${archive#"${ROOT_DIR}"/}"
+    printf 'archive_sha256=%s\n' "$archive_hash"
+    printf 'archive_size=%s\n' "$archive_size"
+    printf 'previous_data_dir=%s\n' "${old_data#"${ROOT_DIR}"/}"
+    printf 'restored_pack_version=%s\n' "$restored_version"
+    printf 'restored_pack_sha256=%s\n' "$restored_hash"
+  } > "$temporary"
+  mv -f -- "$temporary" "$record"
+  printf '%s\n' "$record"
 }
 
 packwiz_run() {
@@ -465,14 +549,17 @@ command_start() {
   service_running minecraft && die "The production server is already running."
 
   offline_snapshot
-  info "Starting Minecraft and the two-hour local backup scheduler"
-  compose up -d minecraft backup-local
+  info "Recreating production containers to refresh the data mount"
+  compose up -d --force-recreate minecraft backup-local
 
   local attempts=0 container_id health
   container_id="$(compose ps -q minecraft)"
   while (( attempts < 60 )); do
     health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
     if [[ "$health" == "healthy" ]]; then
+      if ! write_deployment_record; then
+        warn "Server is healthy, but the deployment record could not be written."
+      fi
       info "Server is healthy on ${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
       return 0
     fi
@@ -579,6 +666,7 @@ command_world() {
         printf 'Staging service: unknown (Docker unavailable)\n'
       fi
       python3 "${ROOT_DIR}/tools/world_control.py" status --root "$ROOT_DIR"
+      show_recovery_provenance
       ;;
     reset)
       local reset_mode="" seed_value="" confirmed=false
@@ -1099,6 +1187,8 @@ command_restore_test() {
   [[ $# -eq 1 ]] || die "Usage: ./mcctl restore-test <archive>"
   local archive target
   archive="$(resolve_backup "$1")"
+  tar -tf "$archive" >/dev/null \
+    || die "Backup cannot be read: $1"
   target="${ROOT_DIR}/runtime/restore-test/$(date '+%Y%m%d-%H%M%S')"
   mkdir -p "$target"
   tar -xf "$archive" -C "$target"
@@ -1109,8 +1199,10 @@ command_restore() {
   [[ $# -eq 2 && "$2" == "--confirm" ]] || die "Usage: ./mcctl restore <archive> --confirm"
   docker_ready
   service_running minecraft && die "Stop the production server before restoring."
-  local archive old_data
-  archive="$(resolve_backup "$1")"
+  local requested="$1" archive old_data restore_record
+  archive="$(resolve_backup "$requested")"
+  tar -tf "$archive" >/dev/null \
+    || die "Backup cannot be read; production data was not changed: $requested"
   old_data="${ROOT_DIR}/runtime/data.pre-restore.$(date '+%Y%m%d-%H%M%S')"
   mv "$DATA_DIR" "$old_data"
   mkdir -p "$DATA_DIR"
@@ -1119,7 +1211,19 @@ command_restore() {
     mv "$old_data" "$DATA_DIR"
     die "Restore failed; original data was put back."
   fi
+  if ! restore_record="$(write_restore_record "$requested" "$archive" "$old_data")"; then
+    restore_record="unavailable"
+    warn "Data was restored, but the recovery audit record could not be written."
+  fi
+  if ! compose rm -sf minecraft backup-local; then
+    warn "Data was restored, but stopped production containers could not be removed."
+    warn "Do not start the server until 'docker compose rm -sf minecraft backup-local' succeeds."
+    die "Restore is complete but old bind mounts may still exist."
+  fi
   info "Restore complete. Previous data remains at ${old_data#"${ROOT_DIR}"/}"
+  info "Stopped production containers were removed; the next start creates fresh data mounts."
+  [[ "$restore_record" == unavailable ]] || \
+    info "Recovery record: ${restore_record#"${ROOT_DIR}"/}"
 }
 
 command_client() {

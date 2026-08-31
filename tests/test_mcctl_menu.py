@@ -202,10 +202,12 @@ class McctlMenuTests(unittest.TestCase):
 
         fake_bin = self.root / "fake-bin"
         fake_bin.mkdir()
+        docker_log = self.root / "docker.log"
         fake_docker = fake_bin / "docker"
         fake_docker.write_text(
             "#!/usr/bin/env bash\n"
             "if [[ $1 == info ]]; then exit 0; fi\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n"
             "if [[ $1 == inspect ]]; then printf 'healthy\\n'; exit 0; fi\n"
             "if [[ $1 == compose && $* == *'ps --status running --services'* ]]; then\n"
             "  exit 0\n"
@@ -222,13 +224,17 @@ class McctlMenuTests(unittest.TestCase):
             "menu",
             "--plain",
             menu_input="1\nq\n",
-            extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            extra_env={
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FAKE_DOCKER_LOG": str(docker_log),
+            },
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("操作已成功完成", result.stdout)
         self.assertNotIn("\n正式服务器\n", result.stderr)
         self.assertIn("✓ 启动正式服务器 完成", result.stdout)
         self.assertGreaterEqual(result.stdout.count("Wezza MC 管理面板"), 2)
+        self.assertIn("up -d --force-recreate minecraft backup-local", docker_log.read_text())
 
     def test_doctor_fails_actionably_in_an_uninitialized_copy(self) -> None:
         result = self.run_mcctl("doctor")
