@@ -116,6 +116,11 @@ hash = "d20369e5848ca31ecbb49bae22e953439173bd4617ca239b23335366b2a6a0e9"
 metafile = true
 
 [[files]]
+file = "mods/refined-storage-jei-integration.pw.toml"
+hash = "c36ba732d0f37899f9ab2b05f5777a89dfe53a241aeaaa8ef33149fae1b8e4f6"
+metafile = true
+
+[[files]]
 file = "mods/refined-storage-quartz-arsenal.pw.toml"
 hash = "67955f2eadd485726c85403f7a809f7c29c9b70db9cf45bac1fedc2f1e751192"
 metafile = true

@@ -1,32 +1,32 @@
 {
   "schema": 1,
-  "pack_version": "26.1.2-r6",
-  "previous_pack_version": "26.1.2-r5",
+  "pack_version": "26.1.2-r7",
+  "previous_pack_version": "26.1.2-r6",
   "minecraft": "26.1.2",
   "fabric_loader": "0.19.3",
   "release_type": "small",
   "requires_reimport": false,
-  "published_at": "2026-08-30T15:02:08+00:00",
+  "published_at": "2026-08-31T13:56:32+00:00",
   "changes": [
     {
-      "action": "removed",
-      "player_operation": null,
-      "metadata": "mods/spark.pw.toml",
-      "name": "spark",
-      "side": "server",
-      "player_action": false,
-      "old": {
-        "name": "spark",
-        "filename": "spark-1.10.173-fabric.jar",
-        "side": "server",
+      "action": "added",
+      "player_operation": "added",
+      "metadata": "mods/refined-storage-jei-integration.pw.toml",
+      "name": "Refined Storage - JEI Integration",
+      "side": "both",
+      "player_action": true,
+      "old": null,
+      "new": {
+        "name": "Refined Storage - JEI Integration",
+        "filename": "refinedstorage-jei-integration-fabric-2.0.1.jar",
+        "side": "both",
         "source": "modrinth",
-        "download_url": "https://cdn.modrinth.com/data/l6YH9Als/versions/iYFOl6lQ/spark-1.10.173-fabric.jar",
+        "download_url": "https://cdn.modrinth.com/data/VzR5wiLo/versions/zyeYfb2E/refinedstorage-jei-integration-fabric-2.0.1.jar",
         "hash_format": "sha512",
-        "hash": "1dcbf2b76ceacf07523afaeaf63d3625b0318077cc6ce588bb701aea4a494bc2a5179fd2ca5aeda9513c6a2248c2ec590387e8aec6ac9fd8e3d01760bbc3dbfb",
-        "project_url": "https://modrinth.com/mod/l6YH9Als",
-        "version_url": "https://modrinth.com/mod/l6YH9Als/version/iYFOl6lQ"
-      },
-      "new": null
+        "hash": "8be13a2b2ec9117561da3b25f1cbad87a7abecb13083a585d0c4e662b88293369406ab99b79006aeb49db76af5b87248747c27caa8d8fdd838532489767f49c6",
+        "project_url": "https://modrinth.com/mod/VzR5wiLo",
+        "version_url": "https://modrinth.com/mod/VzR5wiLo/version/zyeYfb2E"
+      }
     }
   ]
 }
