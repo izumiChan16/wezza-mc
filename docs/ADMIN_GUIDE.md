@@ -364,7 +364,7 @@ MC_BIND_IP=0.0.0.0
 
 重新创建正式服容器后，玩家使用宿主机的局域网 IP（例如 `192.168.x.x:25565`）连接，不要使用 `0.0.0.0`。同时确认 Windows 防火墙只在可信任的专用网络上允许该 TCP 端口。测试服仍固定绑定 `127.0.0.1:25566`。
 
-Windows 内网穿透只转发：
+内网穿透由 Compose 中的 `frpc` 容器管理，与正式 Minecraft 容器共享网络空间，只转发：
 
 ```text
 127.0.0.1:25565 TCP
@@ -379,12 +379,16 @@ Windows 内网穿透只转发：
 
 玩家使用的是穿透服务给出的公网地址，不是 `127.0.0.1`。
 
+配置文件为项目根目录的 `frpc.toml`，以只读方式挂载到容器的 `/etc/frp/frpc.toml`。首次配置可复制 `frpc.example.toml`，再填写穿透服务商提供的地址、端口和认证信息；已有配置无需覆盖。该文件已加入 Git 忽略规则，不要提交真实凭据。`localIP = "127.0.0.1"`、`localPort = 25565` 指向正式服容器内的游戏端口，与宿主机 `MC_PORT` 设置无关。启动前先退出旧的 Windows 穿透客户端，避免同一代理重复注册。
+
+frpc 使用固定版本和摘要的官方镜像，首次运行需要联网拉取。它与正式服一样不在 Docker 重启后自动启动；日常使用 `./mcctl start` 和 `./mcctl stop` 联动管理。
+
 ## 5. 日常开服与关服
 
 ### 5.1 标准开服清单
 
 1. 启动 Docker Desktop。
-2. 启动 Windows 内网穿透客户端。
+2. 确认项目根目录的 `frpc.toml` 已配置，旧的 Windows 穿透客户端已退出。
 3. 打开 Arch WSL。
 4. 确认没有未处理的维护工作。
 5. 启动服务器：
@@ -404,6 +408,19 @@ cd /home/izumi/wezza_mc
 7. 通知玩家服务器已开放。
 
 `start` 会在正式数据非空时先创建停服状态快照，然后**强制重建**正式服和两小时备份调度器的容器，再启动它们。强制重建可确保 Docker Desktop/WSL 不会复用指向旧目录的 bind mount；它不会删除 `runtime/data/` 或任何备份，更不会恢复备份。服务器已运行时再次执行会直接拒绝，不会启动第二份。服务健康后，脚本会把当前 Packwiz 版本、清单哈希和 Git 提交记录到 `runtime/data/.mcctl-deployment`，供后续备份和恢复追溯。
+
+重建正式服前会先停止残留 frpc；正式服健康后，脚本校验 `frpc.toml`，再重建 frpc，使其绑定新的正式服网络空间。配置缺失、校验失败、镜像拉取或容器启动失败时，命令返回非零状态，但正式服和备份调度器保持运行。启动后三秒检查 frpc 是否仍在运行；这不代表公网连接已验证，仍需从外部客户端连接确认。
+
+`./mcctl status` 会显示 frpc 容器状态。隧道故障时，先查看日志、修正配置，再单独校验并重建 frpc（正式服必须已运行）：
+
+```bash
+docker compose logs --tail 100 frpc
+docker compose run --rm --no-deps frpc verify -c /etc/frp/frpc.toml
+docker compose up -d --no-deps --force-recreate frpc
+docker compose ps frpc
+```
+
+只有校验成功后才执行重建。不要用再次执行 `./mcctl start` 来修复已经运行的服务器上的隧道。
 
 ### 5.2 运行期间
 
@@ -453,9 +470,9 @@ cd /home/izumi/wezza_mc
 2. 通过备份容器和 RCON 协调保存。
 3. 创建本机备份。
 4. 如果启用了远端备份，再执行加密异地备份。
-5. 优雅停止备份调度器和 Minecraft，最长等待 120 秒。
+5. 停止 frpc，再优雅停止备份调度器和 Minecraft，后两者最长等待 120 秒。
 
-只有命令完成后，才关闭穿透客户端、Docker Desktop、Windows，或让电脑睡眠。
+只有命令完成后，才关闭 Docker Desktop、Windows，或让电脑睡眠。正式服已退出时，`stop` 仍会停止残留的 frpc；备份失败时则保留正式服和 frpc，方便修复后重试。
 
 如果远端备份失败，脚本会让正式服继续运行，避免在备份状态不明时直接关机。确认本机备份存在后，可明确跳过本次远端备份：
 

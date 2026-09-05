@@ -1,4 +1,5 @@
 .env
+/frpc.toml
 .repo-git/
 secrets/rcon_password.txt
 secrets/restic_password.txt

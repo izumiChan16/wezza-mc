@@ -185,6 +185,7 @@ class McctlMenuTests(unittest.TestCase):
 
     def test_successful_server_lifecycle_action_returns_to_dashboard(self) -> None:
         tools_dir = self.root / "tools"
+        shutil.copy2(ROOT / "frpc.example.toml", self.root / "frpc.toml")
         shutil.copy2(ROOT / "tools" / "world_control.py", tools_dir)
         (self.root / ".env").write_text(
             "EULA=TRUE\n"
@@ -210,7 +211,7 @@ class McctlMenuTests(unittest.TestCase):
             "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n"
             "if [[ $1 == inspect ]]; then printf 'healthy\\n'; exit 0; fi\n"
             "if [[ $1 == compose && $* == *'ps --status running --services'* ]]; then\n"
-            "  exit 0\n"
+            "  printf 'frpc\\n'; exit 0\n"
             "fi\n"
             "if [[ $1 == compose && $* == *'ps -q minecraft'* ]]; then\n"
             "  printf 'production-id\\n'; exit 0\n"

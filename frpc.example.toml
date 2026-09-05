@@ -1,0 +1,13 @@
+# Copy to frpc.toml and fill in credentials from your tunnel provider.
+serverAddr = "frps.example.invalid"
+serverPort = 7000
+auth.method = "token"
+auth.token = "REPLACE_WITH_YOUR_TOKEN"
+
+[[proxies]]
+name = "wezza_mc"
+type = "tcp"
+# frpc shares the Minecraft container's network namespace.
+localIP = "127.0.0.1"
+localPort = 25565
+remotePort = 38166

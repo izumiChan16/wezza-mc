@@ -44,6 +44,23 @@ services:
     secrets:
       - rcon_password
 
+  frpc:
+    image: ghcr.io/fatedier/frpc:v0.71.0@sha256:99ece6a2b62cfc68731e0df289af804ff1c699911cfc47871856434f1d6d53ee
+    restart: "no"
+    network_mode: service:minecraft
+    depends_on:
+      minecraft:
+        condition: service_healthy
+    entrypoint: ["frpc"]
+    command: ["-c", "/etc/frp/frpc.toml"]
+    volumes:
+      - type: bind
+        source: ./frpc.toml
+        target: /etc/frp/frpc.toml
+        read_only: true
+        bind:
+          create_host_path: false
+
   backup-local:
     image: itzg/mc-backup@sha256:cef928637262946c4988d7128eb3e17dcabc399e22b9c1e9d0297de86949a1cf
     restart: "no"

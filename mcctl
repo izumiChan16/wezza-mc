@@ -538,6 +538,27 @@ command_init() {
   info "Runtime directories and local secrets are ready"
 }
 
+start_frpc() {
+  if [[ ! -f "${ROOT_DIR}/frpc.toml" || ! -s "${ROOT_DIR}/frpc.toml" ]]; then
+    warn "Missing or empty frpc.toml. Copy frpc.example.toml and configure your tunnel credentials."
+    return 1
+  fi
+  if ! compose run --rm --no-deps frpc verify -c /etc/frp/frpc.toml; then
+    warn "frpc configuration verification failed. Check frpc.toml and image availability."
+    return 1
+  fi
+  if ! compose up -d --no-deps --force-recreate frpc; then
+    warn "Could not start frpc. Check 'docker compose logs --tail 100 frpc'."
+    return 1
+  fi
+  sleep 3
+  if ! service_running frpc; then
+    warn "frpc exited after startup. Check 'docker compose logs --tail 100 frpc'."
+    return 1
+  fi
+  info "frpc is running; verify the public address from an external client."
+}
+
 command_start() {
   [[ $# -eq 0 ]] || die "Usage: ./mcctl start"
   load_settings
@@ -550,6 +571,8 @@ command_start() {
   service_running minecraft && die "The production server is already running."
 
   offline_snapshot
+  # A recreated Minecraft container has a new network namespace.
+  compose stop frpc
   info "Recreating production containers to refresh the data mount"
   compose up -d --force-recreate minecraft backup-local
 
@@ -562,6 +585,9 @@ command_start() {
         warn "Server is healthy, but the deployment record could not be written."
       fi
       info "Server is healthy on ${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
+      if ! start_frpc; then
+        die "Tunnel startup failed; Minecraft and the backup scheduler remain running. Fix frpc, then run 'docker compose up -d --no-deps --force-recreate frpc'."
+      fi
       return 0
     fi
     if [[ "$health" == "exited" || "$health" == "dead" ]]; then
@@ -581,7 +607,11 @@ command_stop() {
   load_settings
   ensure_initialized
   docker_ready
-  service_running minecraft || { info "The production server is already stopped"; return 0; }
+  if ! service_running minecraft; then
+    compose stop frpc
+    info "The production server is already stopped; any remaining frpc was stopped"
+    return 0
+  fi
 
   local skip_remote=false
   [[ "${1:-}" == "--skip-remote" ]] && skip_remote=true
@@ -593,7 +623,8 @@ command_stop() {
     run_remote_backup || die "Remote backup failed; server left running. Retry or use stop --skip-remote."
   fi
 
-  info "Stopping backup scheduler and Minecraft gracefully"
+  info "Stopping frpc, backup scheduler and Minecraft gracefully"
+  compose stop frpc
   compose stop -t 120 backup-local minecraft
 }
 
