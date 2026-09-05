@@ -79,6 +79,76 @@ class BackupCommandTests(unittest.TestCase):
         self.assertIn("local", result.stdout)
         self.assertIn("offline", result.stdout)
 
+    def test_batch_delete_deduplicates_and_preserves_unselected_archives(self) -> None:
+        first = self.archive("offline", "first.tar.zst")
+        second = self.archive("offline", "second.tar.zst")
+        kept = self.archive("offline", "kept.tar.zst")
+        result = self.run_mcctl(
+            "backup", "delete", f"offline/{first.name}", second.name,
+            first.name, "--confirm",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertTrue(kept.exists())
+        self.assertIn("Deleted 2 archive(s)", result.stdout)
+
+    def test_batch_preflight_rejects_missing_path_and_symlink_before_deleting(self) -> None:
+        target = self.archive("offline")
+        link = target.with_name("link.tar.zst")
+        link.symlink_to(target)
+        for invalid in ("missing.tar.zst", "../fixture.tar.zst", "offline/link.tar.zst"):
+            with self.subTest(invalid=invalid):
+                result = self.run_mcctl("backup", "delete", target.name, invalid, "--confirm")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(target.exists())
+
+    def test_batch_preflight_preserves_all_when_scheduler_runs(self) -> None:
+        offline = self.archive("offline", "offline.tar.zst")
+        local = self.archive("local", "local.tar.zst")
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        docker = fake_bin / "docker"
+        docker.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ $1 == info ]]; then exit 0; fi\n"
+            "printf 'backup-local\\n'\n",
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        result = self.run_mcctl(
+            "backup", "delete", f"offline/{offline.name}", f"local/{local.name}",
+            "--confirm", extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No archives were deleted", result.stderr)
+        self.assertTrue(offline.exists())
+        self.assertTrue(local.exists())
+
+    def test_batch_reports_partial_deletion_on_filesystem_failure(self) -> None:
+        first = self.archive("offline", "first.tar.zst")
+        second = self.archive("offline", "second.tar.zst")
+        third = self.archive("offline", "third.tar.zst")
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        rm = fake_bin / "rm"
+        rm.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ $* == *second.tar.zst* ]]; then exit 1; fi\n"
+            "exec /bin/rm \"$@\"\n",
+            encoding="utf-8",
+        )
+        rm.chmod(0o755)
+        result = self.run_mcctl(
+            "backup", "delete", first.name, second.name, third.name, "--confirm",
+            extra_env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Deleted 1 of 3", result.stderr)
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+        self.assertTrue(third.exists())
+
     def test_backup_list_reports_category_and_total_usage(self) -> None:
         self.archive("local", "local-size.tar.zst", size=1024)
         self.archive("offline", "offline-size.tar.zst", size=2048)

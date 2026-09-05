@@ -183,6 +183,63 @@ class McctlMenuTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertIn("请输入 Y 或 N", result.stderr)
 
+    def test_batch_delete_refreshes_selection_without_returning_to_category(self) -> None:
+        targets = [self.archive(f"backup-{index}.tar.zst") for index in range(3)]
+        result = self.run_mcctl(
+            "menu", "--plain", menu_input="4\n7\n1,2,2\ny\n1\ny\nq\nq\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(not target.exists() for target in targets))
+        self.assertIn("共 2 个 · 14 B", result.stderr)
+        self.assertIn("共 1 个 · 7 B", result.stderr)
+        self.assertEqual(result.stderr.count("世界与备份 ·"), 2)
+        self.assertEqual(result.stderr.count("选择要删除的备份（可多选）"), 2)
+
+    def test_batch_selection_invalid_input_and_cancel_preserve_files(self) -> None:
+        targets = [self.archive(f"backup-{index}.tar.zst") for index in range(3)]
+        result = self.run_mcctl(
+            "menu", "--plain",
+            menu_input="4\n7\n0 1\n1 999\n1 x\n1 2\nn\nq\nq\nq\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(target.exists() for target in targets))
+        self.assertEqual(result.stderr.count("请输入有效的菜单编号"), 3)
+        self.assertEqual(result.stderr.count("选择要删除的备份（可多选）"), 2)
+
+    def test_batch_select_all_and_empty_selection(self) -> None:
+        targets = [self.archive(f"backup-{index}.tar.zst") for index in range(3)]
+        cancelled = self.run_mcctl("menu", "--plain", menu_input="4\n7\n\nq\nq\n")
+        self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+        self.assertTrue(all(target.exists() for target in targets))
+        result = self.run_mcctl("menu", "--plain", menu_input="4\n7\na\ny\nq\nq\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(not target.exists() for target in targets))
+        self.assertIn("共 3 个 · 21 B", result.stderr)
+
+    def test_fzf_batch_selection_deletes_multiple_archives(self) -> None:
+        targets = [self.archive(f"backup-{index}.tar.zst") for index in range(2)]
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        fzf = fake_bin / "fzf"
+        fzf.write_text(
+            "#!/usr/bin/env bash\n"
+            "[[ $* == *--multi* ]] || exit 1\n"
+            "[[ $* == *ctrl-a:select-all* ]] || exit 1\n"
+            "cat\n",
+            encoding="utf-8",
+        )
+        fzf.chmod(0o755)
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1" help >/dev/null; MENU_FZF=true; menu_backup_delete',
+             "test", str(self.root / "mcctl")],
+            input="y\n", capture_output=True, text=True, check=False,
+            env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                 "MCCTL_MENU_NO_PAUSE": "true"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(not target.exists() for target in targets))
+        self.assertIn("共 2 个", result.stderr)
+
     def test_successful_server_lifecycle_action_returns_to_dashboard(self) -> None:
         tools_dir = self.root / "tools"
         shutil.copy2(ROOT / "frpc.example.toml", self.root / "frpc.toml")

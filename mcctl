@@ -84,7 +84,7 @@ Staging:
 
 Backups:
   backup                       Create an online or offline local backup
-  backup delete <archive>      Delete one local archive (requires --confirm)
+  backup delete <archive>...   Delete selected local archives (requires --confirm)
   backup-list                  List local archives
   backup-delete <archive>      Alias for 'backup delete' (requires --confirm)
   restore-test <archive>       Extract an archive into runtime/restore-test
@@ -1226,19 +1226,32 @@ command_backup_list() {
 }
 
 command_backup_delete() {
-  [[ $# -eq 2 && "$2" == "--confirm" ]] \
-    || die "Usage: ./mcctl backup delete <archive> --confirm"
-  local archive requested="$1"
-  archive="$(resolve_backup "$requested")"
-  [[ ! -L "$archive" ]] || die "Backup ID must refer to a real archive, not a symlink."
-  if [[ "$archive" == "$LOCAL_BACKUP_DIR/"* ]] \
-    && docker info >/dev/null 2>&1 \
+  [[ $# -ge 2 && "${!#}" == "--confirm" ]] \
+    || die "Usage: ./mcctl backup delete <archive>... --confirm"
+  local archive requested deleted=0 has_local=false
+  local -a archives=()
+  local -A seen=()
+  # Validate the entire selection before removing any archive.
+  for requested in "${@:1:$#-1}"; do
+    archive="$(resolve_backup "$requested")" || return 1
+    [[ ! -L "$archive" ]] || die "Backup ID must refer to a real archive, not a symlink."
+    [[ -z "${seen[$archive]:-}" ]] || continue
+    seen["$archive"]=1
+    archives+=("$archive")
+    [[ "$archive" != "$LOCAL_BACKUP_DIR/"* ]] || has_local=true
+  done
+  if [[ "$has_local" == true ]] && docker info >/dev/null 2>&1 \
     && service_running backup-local; then
-    die "The local backup scheduler is running; stop it before deleting an online archive."
+    die "The local backup scheduler is running; stop it before deleting an online archive. No archives were deleted."
   fi
-  info "Deleting backup archive: ${archive#"${ROOT_DIR}"/}"
-  rm -f -- "$archive"
-  [[ ! -e "$archive" ]] || die "Could not delete backup archive: $requested"
+  for archive in "${archives[@]}"; do
+    info "Deleting backup archive: ${archive#"${ROOT_DIR}"/}"
+    if ! rm -- "$archive"; then
+      die "Could not delete ${archive#"${ROOT_DIR}"/}. Deleted $deleted of ${#archives[@]} archives; remaining archives were kept."
+    fi
+    deleted=$((deleted + 1))
+  done
+  info "Deleted $deleted archive(s) permanently; they cannot be recovered by mcctl."
   info "Backup deleted. Remote restic backups, if enabled, were not changed."
 }
 
@@ -1813,6 +1826,7 @@ select_mod_slug() {
 }
 
 select_backup_id() {
+  local selection_mode="${1:-single}" title="${2:-选择备份归档}"
   local epoch scope size filename timestamp selected
   local -a entries=()
   while IFS=$'\t' read -r epoch scope size filename; do
@@ -1830,9 +1844,96 @@ select_backup_id() {
     } | sort -rn
   )
   (( ${#entries[@]} > 0 )) || { warn "没有找到本机备份归档。"; return 1; }
-  selected="$(menu_select '选择备份归档' "${entries[@]}")"
+  if [[ "$selection_mode" == multi ]]; then
+    menu_select_multiple "$title" "${entries[@]}"
+    return $?
+  fi
+  selected="$(menu_select "$title" "${entries[@]}")"
   [[ "$selected" != "__back" ]] || return 1
   printf '%s\n' "$selected"
+}
+
+menu_select_multiple() {
+  local title="$1" selected entry choice token index valid
+  shift
+  local -a entries=("$@") tokens=() ids=() choices=()
+  local -A seen=()
+  if [[ "$MENU_FZF" == true ]]; then
+    selected="$(printf '%s\n' "${entries[@]}" | fzf \
+      --multi --height=80% --layout=reverse --border --cycle \
+      --delimiter=$'\t' --with-nth=2,3 \
+      --bind='ctrl-a:select-all,ctrl-d:deselect-all' \
+      --prompt='搜索 / 多选 > ' \
+      --header="$title · Tab：多选  Ctrl-A：全选  Ctrl-D：清空  Enter：确认选择  Esc：返回")" || return 1
+    [[ -n "$selected" ]] || return 1
+    while IFS= read -r entry; do
+      printf '%s\n' "${entry%%$'\t'*}"
+    done <<< "$selected"
+    return 0
+  fi
+  printf '\n%s\n' "$title" >&2
+  index=0
+  for entry in "${entries[@]}"; do
+    index=$((index + 1))
+    ids+=("${entry%%$'\t'*}")
+    printf '%2d) %s\n' "$index" "${entry#*$'\t'}" >&2
+  done
+  printf '输入多个编号（如 1 3 5 或 1,3,5）；a 全选；q 返回。\n' >&2
+  while true; do
+    printf '请选择：' >&2
+    IFS= read -r choice || return 1
+    case "$choice" in
+      q|Q|b|B|"") return 1 ;;
+      a|A) printf '%s\n' "${ids[@]}"; return 0 ;;
+    esac
+    read -r -a tokens <<< "${choice//,/ }"
+    choices=()
+    seen=()
+    valid=true
+    for token in "${tokens[@]}"; do
+      if [[ ! "$token" =~ ^[0-9]{1,6}$ ]]; then valid=false; break; fi
+      index=$((10#$token))
+      if (( index < 1 || index > ${#ids[@]} )); then valid=false; break; fi
+      [[ -z "${seen[$index]:-}" ]] || continue
+      seen["$index"]=1
+      choices+=("${ids[index-1]}")
+    done
+    if [[ "$valid" == true && ${#choices[@]} -gt 0 ]]; then
+      printf '%s\n' "${choices[@]}"
+      return 0
+    fi
+    printf '请输入有效的菜单编号（可用空格或逗号分隔）、a 或 q。\n' >&2
+  done
+}
+
+menu_backup_delete() {
+  local selection backup_id archive size total valid menu_title
+  local -a backup_ids=()
+  while true; do
+    menu_prepare_title menu_title '选择要删除的备份（可多选）'
+    selection="$(select_backup_id multi "$menu_title")" || return 0
+    mapfile -t backup_ids <<< "$selection"
+    total=0
+    valid=true
+    printf '\n将永久删除以下本机归档：\n' >&2
+    for backup_id in "${backup_ids[@]}"; do
+      archive="$(resolve_backup "$backup_id")" || { valid=false; break; }
+      size="$(stat -c '%s' -- "$archive")" || { valid=false; break; }
+      total=$((total + size))
+      printf '  %s · %s\n' "$backup_id" "$(format_bytes "$size")" >&2
+    done
+    if [[ "$valid" != true ]]; then
+      warn "备份列表已变化，请重新选择。"
+      continue
+    fi
+    printf '共 %s 个 · %s；无法通过 mcctl 恢复，不影响远端 restic 快照。\n' \
+      "${#backup_ids[@]}" "$(format_bytes "$total")" >&2
+    if confirm_yes "确认删除这 ${#backup_ids[@]} 个备份吗？"; then
+      run_menu_command "删除 ${#backup_ids[@]} 个备份" command_backup_delete "${backup_ids[@]}" --confirm
+    else
+      menu_cancelled
+    fi
+  done
 }
 
 menu_edit_env() {
@@ -1957,7 +2058,7 @@ menu_world_backup() {
       $'backup_list\t列出备份\t显示 local、offline 和总占用' \
       $'restore_test\t测试备份\t解压到隔离的 runtime/restore-test' \
       $'restore\t恢复正式服\t可恢复地替换已停止的正式服数据' \
-      $'backup_delete\t删除备份\t使用 Y/N 确认并永久删除一个本机归档' \
+      $'backup_delete\t删除备份（可多选）\t批量确认；删除后留在备份列表继续清理' \
       $'__back\t返回\t返回状态总览')"
     case "$selected" in
     world_status) run_menu_command --read "世界状态" command_world status ;;
@@ -2004,13 +2105,7 @@ menu_world_backup() {
         [[ "$MENU_LAST_STATUS" -eq 0 ]] && return 0
       else menu_cancelled; fi
       ;;
-    backup_delete)
-      backup_id="$(select_backup_id)" || continue
-      printf '\n这会永久删除一个本机归档，不影响远端 restic 快照。\n' >&2
-      if confirm_yes "确认删除 $backup_id 吗？"; then
-        run_menu_command "删除备份 $backup_id" command_backup_delete "$backup_id" --confirm
-      else menu_cancelled; fi
-      ;;
+    backup_delete) menu_backup_delete ;;
     __back) return 0 ;;
     esac
   done
