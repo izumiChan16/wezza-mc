@@ -12,6 +12,7 @@ ACCEPTED_FILE="${STAGING_DIR}/ACCEPTED_PACK_SHA256"
 STAGING_ERROR_FILE="${STAGING_DIR}/LAST_ERROR.log"
 RELEASE_FILE="${ROOT_DIR}/site/release.json"
 STAGING_SESSION_TOOL="${ROOT_DIR}/tools/staging_session.py"
+MOD_CATALOG_TOOL="${ROOT_DIR}/tools/mod_catalog.py"
 DEPLOYMENT_RECORD_FILE="${DATA_DIR}/.mcctl-deployment"
 
 cd "$ROOT_DIR"
@@ -57,8 +58,8 @@ World:
                                Both reset forms require --confirm and a stopped server
 
 Mods and clients:
-  mod list                     List metadata slugs, sides, sources, and names
-  mod add <URL-or-slug>        Add from Modrinth, CurseForge, or an HTTPS URL
+  mod list                     List sides and highest supported Fabric MC versions
+  mod add <URL-or-slug>        Add a candidate and choose every new mod's side
   mod remove <name>            Remove Packwiz metadata
   mod side <name> <side>       Set client, server, or both explicitly
   mod update <name|all>        Apply a candidate update locally
@@ -732,12 +733,16 @@ command_mod() {
   case "$action" in
     list)
       [[ $# -eq 0 ]] || die "Usage: ./mcctl mod list"
-      python3 "${ROOT_DIR}/tools/validate_pack.py" "${ROOT_DIR}/pack"
+      python3 "$MOD_CATALOG_TOOL" list "${ROOT_DIR}/pack"
       ;;
     add)
       [[ $# -ge 1 ]] || die "Usage: ./mcctl mod add <URL-or-slug>"
-      local source="$1" candidate_dir
+      [[ $# -eq 1 ]] || die "Usage: ./mcctl mod add <URL-or-slug>"
+      local source="$1" candidate_dir metadata_path metadata_name selected_side
+      local -a new_metadata=()
       candidate_dir="$(candidate_pack_dir)"
+      trap 'rm -rf -- "$candidate_dir"' EXIT
+      trap 'exit 130' INT TERM
       if [[ "$source" == *curseforge.com/* ]]; then
         if ! packwiz_run_in "$candidate_dir" --yes curseforge add "$source"; then
           rm -rf -- "$candidate_dir"
@@ -763,12 +768,54 @@ command_mod() {
         rm -rf -- "$candidate_dir"
         die "Only Modrinth/CurseForge identifiers or HTTPS URLs are accepted."
       fi
+
+      while IFS= read -r -d '' metadata_path; do
+        metadata_name="$(basename "$metadata_path")"
+        if [[ ! -f "${ROOT_DIR}/pack/mods/${metadata_name}" ]]; then
+          new_metadata+=("mods/${metadata_name}")
+        fi
+      done < <(find "${candidate_dir}/mods" -maxdepth 1 -type f -name '*.pw.toml' \
+        -print0 | sort -z)
+      if (( ${#new_metadata[@]} == 0 )); then
+        rm -rf -- "$candidate_dir"
+        trap - EXIT INT TERM
+        die "Packwiz did not add any new mod metadata; the real pack was not changed."
+      fi
+
+      for metadata_path in "${new_metadata[@]}"; do
+        metadata_name="$(basename "$metadata_path" .pw.toml)"
+        printf '\n=== 请判断 %s 的安装侧 ===\n\n' "$metadata_name"
+        if ! python3 "$MOD_CATALOG_TOOL" inspect "$candidate_dir" "$metadata_path"; then
+          rm -rf -- "$candidate_dir"
+          trap - EXIT INT TERM
+          die "Could not retrieve official information for ${metadata_name}; the real pack was not changed."
+        fi
+        selected_side="$(menu_select "选择 ${metadata_name} 的安装侧（必须人工确认）" \
+          $'client\t仅客户端\t只安装到玩家整合包' \
+          $'server\t仅服务端\t只安装到专用服务器' \
+          $'both\t客户端与服务端\t双方都安装')"
+        if [[ "$selected_side" == "__back" ]]; then
+          rm -rf -- "$candidate_dir"
+          trap - EXIT INT TERM
+          info "Mod addition cancelled; the real pack was not changed."
+          return 130
+        fi
+        sed -i -E "s/^side = \"(client|server|both)\"$/side = \"${selected_side}\"/" \
+          "${candidate_dir}/${metadata_path}"
+        if ! grep -Fxq "side = \"${selected_side}\"" "${candidate_dir}/${metadata_path}"; then
+          rm -rf -- "$candidate_dir"
+          trap - EXIT INT TERM
+          die "Could not set side for ${metadata_name}; the real pack was not changed."
+        fi
+      done
       if ! validate_candidate_pack "$candidate_dir"; then
         rm -rf -- "$candidate_dir"
+        trap - EXIT INT TERM
         die "Candidate validation failed; the real pack was not changed."
       fi
       promote_candidate_pack "$candidate_dir"
       rm -rf -- "$candidate_dir"
+      trap - EXIT INT TERM
       info "Candidate added locally. Run stage start and test it before publishing."
       ;;
     remove)
@@ -1817,7 +1864,7 @@ menu_mods() {
   while true; do
     menu_prepare_title menu_title '修改候选整合包'
     selected="$(menu_select "$menu_title" \
-      $'list\t列出模组\t显示 slug、安装侧、来源和名称' \
+      $'list\t列出模组\t显示安装侧、来源和最高支持的 Fabric 正式版' \
       $'add\t添加模组\t使用 Modrinth slug、CurseForge 或 HTTPS URL' \
       $'update_check\t检查更新\t在临时整合包副本中比较' \
       $'update_one\t更新一个模组\t从列表选择，无需手输 slug' \
@@ -1831,7 +1878,7 @@ menu_mods() {
     list) run_menu_command --read "当前模组" command_mod list ;;
     add)
       source="$(prompt_value 'Modrinth slug 或模组 URL：')" || { menu_cancelled; continue; }
-      run_menu_command "添加候选模组" command_mod add "$source"
+      run_menu_command "查看资料、选择 side 并添加候选模组" command_mod add "$source"
       ;;
     update_check) run_menu_command --read "检查模组更新" command_mod update-check ;;
     update_one)

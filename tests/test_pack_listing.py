@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -36,14 +37,20 @@ class PackListingTests(unittest.TestCase):
         self.assertIn("refined-storage", result.stdout)
 
     def test_bare_mod_command_is_a_listing_alias(self) -> None:
+        env = {
+            **os.environ,
+            "MCCTL_MODRINTH_API_BASE": "http://127.0.0.1:9",
+        }
         result = subprocess.run(
             [str(ROOT / "mcctl"), "mod"],
             cwd=ROOT,
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
         self.assertTrue(result.stdout.startswith("SLUG"))
+        self.assertIn("MAX_MC", result.stdout.splitlines()[0])
 
 
 if __name__ == "__main__":

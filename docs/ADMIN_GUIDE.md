@@ -582,7 +582,9 @@ git pull --ff-only
 ./mcctl mod list
 ```
 
-表格列出 `SLUG`、`SIDE`、`SOURCE` 和显示名称。`SLUG` 就是 `pack/mods/<slug>.pw.toml` 的文件名，可直接用于后面的 `mod update`、`mod side` 和 `mod remove` 命令；不带参数执行 `./mcctl mod` 也会显示这张表。该命令只做本地读取和校验，不刷新或修改清单。
+表格列出 `SLUG`、`SIDE`、`SOURCE`、`MAX_MC` 和显示名称。`SLUG` 就是 `pack/mods/<slug>.pw.toml` 的文件名，可直接用于后面的 `mod update`、`mod side` 和 `mod remove` 命令；不带参数执行 `./mcctl mod` 也会显示这张表。
+
+`MAX_MC` 表示 Modrinth 上存在可用 Fabric 文件的最高 Minecraft 正式版本。模组文件自身可以是 release、beta 或 alpha，但 Minecraft snapshot 不会作为服务器升级目标。查询使用 Modrinth 官方实时数据，不把结果写入仓库；网络失败、CurseForge 和作者直链会显示 `unknown` 并给出警告。本地 Packwiz 清单仍会照常校验，查询失败不会修改清单。
 
 ### 7.3 添加 Modrinth 模组
 
@@ -598,7 +600,9 @@ git pull --ff-only
 ./mcctl mod add https://modrinth.com/mod/sodium
 ```
 
-命令在临时副本中调用 Packwiz；验证成功才会把候选清单复制回 `pack/`。此时只是本地候选，尚未部署到正式服务器或 Pages。
+命令在临时副本中调用 Packwiz。Packwiz 选好当前文件并解析依赖后，`mcctl` 会依次显示目标模组和每个新依赖的官网名称、简介、项目页、版本页、文件名、Minecraft 版本、加载器、发布通道和官方 environment。阅读这些资料后，必须为每一项分别选择 `client`、`server` 或 `both`；Packwiz 自动给出的 side 不会直接采用。
+
+只有所有项目都完成选择且验证成功，候选清单才会复制回 `pack/`。按 `q`、输入结束、Modrinth 官网资料查询失败或后续验证失败，都会丢弃整份临时副本，真实清单保持不变。该命令因此是人工交互命令，不用于无人值守脚本。添加成功后仍只是本地候选，尚未部署到正式服务器或 Pages。
 
 ### 7.4 添加 CurseForge 模组
 
@@ -615,6 +619,8 @@ git pull --ff-only
 
 自动添加成功不代表允许发布。继续之前必须完成[非 Modrinth 文件许可登记](#10-非-modrinth-文件许可登记)。
 
+CurseForge 不配置额外 API key，因此添加时只显示 Packwiz 选中的文件和可打开的 CurseForge 官方项目页；最高 Fabric 版本和官方安装环境会明确显示为 `unknown`，必须在网页上自行核对。
+
 ### 7.5 添加作者 HTTPS 直链
 
 只使用作者控制的永久 HTTPS 地址，优先官方 GitHub Release：
@@ -624,6 +630,8 @@ git pull --ff-only
 ```
 
 直链通常不能由 Packwiz 自动发现更新。不要使用临时签名 URL、网盘跳转页、需要 Cookie 的链接或来源不明的镜像。
+
+直链没有结构化官网资料。添加时会显示原始 URL 和文件名，并把最高版本与安装环境标记为 `unknown`；必须在作者页面确认 side 后再选择。
 
 ### 7.6 设置安装侧
 
@@ -1817,8 +1825,8 @@ gh run view <运行编号> --log-failed
 
 | 命令 | 作用 |
 |---|---|
-| `./mcctl mod list` | 列出 metadata slug、安装侧、来源和名称 |
-| `./mcctl mod add <slug或URL>` | 添加候选模组 |
+| `./mcctl mod list` | 列出 metadata slug、安装侧、来源和最高 Fabric 正式版 |
+| `./mcctl mod add <slug或URL>` | 查看官网资料，逐项选择 side 后添加候选模组 |
 | `./mcctl mod remove <slug>` | 可恢复地移除元数据 |
 | `./mcctl mod side <slug> <client\|server\|both>` | 修正安装侧 |
 | `./mcctl mod update-check` | 在临时副本检查全部更新 |
