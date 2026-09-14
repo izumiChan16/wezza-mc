@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "pack_version": "26.1.2-r5",
+  "previous_pack_version": "26.1.2-r4",
+  "minecraft": "26.1.2",
+  "fabric_loader": "0.19.3",
+  "release_type": "small",
+  "requires_reimport": false,
+  "published_at": "2026-08-30T14:41:22+00:00",
+  "changes": [
+    {
+      "action": "added",
+      "player_operation": "added",
+      "metadata": "mods/veinminer.pw.toml",
+      "name": "VeinMiner",
+      "side": "both",
+      "player_action": true,
+      "old": null,
+      "new": {
+        "name": "VeinMiner",
+        "filename": "veinminer-fabric-2.10.3.jar",
+        "side": "both",
+        "source": "modrinth",
+        "download_url": "https://cdn.modrinth.com/data/OhduvhIc/versions/h4Z7xAL0/veinminer-fabric-2.10.3.jar",
+        "hash_format": "sha512",
+        "hash": "c464ca89a8cec32892d57e701c9d1d16b5bb2b7c0a989ba9671d72b8d8f0d1279ead59542b7334cf1c7024a711784080c08c16bfa25b9dd7a16c5dddde27e1c5",
+        "project_url": "https://modrinth.com/mod/OhduvhIc",
+        "version_url": "https://modrinth.com/mod/OhduvhIc/version/h4Z7xAL0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "releases": [
+    {
+      "pack_version": "26.1.2-r7",
+      "previous_pack_version": "26.1.2-r6",
+      "minecraft": "26.1.2",
+      "published_at": "2026-08-31T13:56:32+00:00",
+      "release_type": "small",
+      "requires_reimport": false,
+      "player_change_count": 1,
+      "server_change_count": 0,
+      "file": "26.1.2-r7.json"
+    },
+    {
+      "pack_version": "26.1.2-r6",
+      "previous_pack_version": "26.1.2-r5",
+      "minecraft": "26.1.2",
+      "published_at": "2026-08-30T15:02:08+00:00",
+      "release_type": "small",
+      "requires_reimport": false,
+      "player_change_count": 0,
+      "server_change_count": 1,
+      "file": "26.1.2-r6.json"
+    },
+    {
+      "pack_version": "26.1.2-r5",
+      "previous_pack_version": "26.1.2-r4",
+      "minecraft": "26.1.2",
+      "published_at": "2026-08-30T14:41:22+00:00",
+      "release_type": "small",
+      "requires_reimport": false,
+      "player_change_count": 1,
+      "server_change_count": 0,
+      "file": "26.1.2-r5.json"
+    },
+    {
+      "pack_version": "26.1.2-r4",
+      "previous_pack_version": "26.1.2-r3",
+      "minecraft": "26.1.2",
+      "published_at": "2026-08-30T00:45:14+00:00",
+      "release_type": "full",
+      "requires_reimport": true,
+      "player_change_count": 1,
+      "server_change_count": 1,
+      "file": "26.1.2-r4.json"
+    },
+    {
+      "pack_version": "26.1.2-r3",
+      "previous_pack_version": "26.1.2-r2",
+      "minecraft": "26.1.2",
+      "published_at": "2026-08-29T15:00:19+00:00",
+      "release_type": "small",
+      "requires_reimport": false,
+      "player_change_count": 0,
+      "server_change_count": 1,
+      "file": "26.1.2-r3.json"
+    },
+    {
+      "pack_version": "26.1.2-r2",
+      "previous_pack_version": "26.1.2-r1",
+      "minecraft": "26.1.2",
+      "published_at": "2026-08-29T11:05:57+00:00",
+      "release_type": "full",
+      "requires_reimport": true,
+      "player_change_count": 18,
+      "server_change_count": 2,
+      "file": "26.1.2-r2.json"
+    },
+    {
+      "pack_version": "26.1.2-r1",
+      "previous_pack_version": "0.1.0",
+      "minecraft": "26.1.2",
+      "published_at": "2026-08-29T08:44:14+00:00",
+      "release_type": "full",
+      "requires_reimport": true,
+      "player_change_count": 0,
+      "server_change_count": 0,
+      "file": "26.1.2-r1.json"
+    }
+  ]
+}

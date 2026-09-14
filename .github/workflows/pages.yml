@@ -52,10 +52,13 @@ jobs:
           cp -a pack/. public/
           rm -f public/.packwizignore public/redistribution.toml
           cp site/index.html site/updates.html site/release.json public/
+          cp -a site/releases public/
           python3 tools/validate_pack.py pack --json-output public/mods.json
           python3 tools/release_pack.py safety --pack-dir pack
           python3 tools/release_pack.py release-check --pack-dir pack \
             --release site/release.json
+          python3 tools/release_pack.py history-check \
+            --release site/release.json --history-dir site/releases
           PACK_VERSION="$(python3 tools/release_pack.py version --pack-dir pack)"
           cd pack
           "$(go env GOPATH)/bin/packwiz" modrinth export \

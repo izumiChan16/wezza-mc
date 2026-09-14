@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "pack_version": "26.1.2-r1",
+  "previous_pack_version": "0.1.0",
+  "minecraft": "26.1.2",
+  "fabric_loader": "0.19.3",
+  "release_type": "full",
+  "requires_reimport": true,
+  "published_at": "2026-08-29T08:44:14+00:00",
+  "message": "首次发布标准 Modrinth 整合包。",
+  "changes": []
+}

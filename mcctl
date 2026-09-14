@@ -11,6 +11,7 @@ RESTORE_HISTORY_DIR="${ROOT_DIR}/runtime/restore-history"
 ACCEPTED_FILE="${STAGING_DIR}/ACCEPTED_PACK_SHA256"
 STAGING_ERROR_FILE="${STAGING_DIR}/LAST_ERROR.log"
 RELEASE_FILE="${ROOT_DIR}/site/release.json"
+RELEASE_HISTORY_DIR="${ROOT_DIR}/site/releases"
 STAGING_SESSION_TOOL="${ROOT_DIR}/tools/staging_session.py"
 MOD_CATALOG_TOOL="${ROOT_DIR}/tools/mod_catalog.py"
 DEPLOYMENT_RECORD_FILE="${DATA_DIR}/.mcctl-deployment"
@@ -1055,12 +1056,13 @@ command_mod() {
         || die "Releases must be published from the main branch."
 
       git -C "$ROOT_DIR" diff --quiet HEAD -- . ':(exclude)pack' ':(exclude)site/release.json' \
-        || die "Commit non-pack changes before publishing; this command only commits pack/ and site/release.json."
+        ':(exclude)site/releases' \
+        || die "Commit non-release changes before publishing; this command only commits pack/ and release metadata."
       local outside_untracked
       outside_untracked="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard -- \
-        . ':(exclude)pack' ':(exclude)site/release.json')"
+        . ':(exclude)pack' ':(exclude)site/release.json' ':(exclude)site/releases')"
       [[ -z "$outside_untracked" ]] \
-        || die "Commit or remove non-pack untracked files before publishing: ${outside_untracked//$'\n'/, }"
+        || die "Commit or remove non-release untracked files before publishing: ${outside_untracked//$'\n'/, }"
 
       git -C "$ROOT_DIR" diff --quiet HEAD -- pack \
         && die "There are no Minecraft, Fabric, or mod changes to publish."
@@ -1100,16 +1102,20 @@ command_mod() {
       rm -f -- "$exported"
       promote_candidate_pack "$publish_dir"
       cp "$release_json" "$RELEASE_FILE"
+      python3 "${ROOT_DIR}/tools/release_pack.py" archive \
+        --release "$RELEASE_FILE" --history-dir "$RELEASE_HISTORY_DIR"
       python3 "${ROOT_DIR}/tools/release_pack.py" release-check \
         --pack-dir "${ROOT_DIR}/pack" --release "$RELEASE_FILE"
+      python3 "${ROOT_DIR}/tools/release_pack.py" history-check \
+        --release "$RELEASE_FILE" --history-dir "$RELEASE_HISTORY_DIR"
       rm -rf -- "$publish_dir"
       rm -f -- "$release_json"
 
-      git -C "$ROOT_DIR" add pack site/release.json
-      git -C "$ROOT_DIR" diff --cached --quiet -- pack site/release.json \
+      git -C "$ROOT_DIR" add pack site/release.json site/releases
+      git -C "$ROOT_DIR" diff --cached --quiet -- pack site/release.json site/releases \
         && die "There are no release changes to publish."
       git -C "$ROOT_DIR" commit -m "chore(pack): publish ${pack_version} (${release_type})" \
-        -- pack site/release.json
+        -- pack site/release.json site/releases
       git -C "$ROOT_DIR" push origin HEAD
       info "Pushed ${pack_version}. GitHub Pages will build the standard MRPACK."
       ;;
@@ -1930,6 +1936,14 @@ command_doctor() {
     doctor_item OK "发布元数据" "与当前整合包一致"
   else
     doctor_item FAIL "发布元数据" "release-check 校验失败"
+    failures=$((failures + 1))
+  fi
+
+  if python3 "${ROOT_DIR}/tools/release_pack.py" history-check \
+    --release "$RELEASE_FILE" --history-dir "$RELEASE_HISTORY_DIR" >/dev/null 2>&1; then
+    doctor_item OK "发布历史" "索引和版本链有效"
+  else
+    doctor_item FAIL "发布历史" "history-check 校验失败"
     failures=$((failures + 1))
   fi
 

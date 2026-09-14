@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "pack_version": "26.1.2-r7",
+  "previous_pack_version": "26.1.2-r6",
+  "minecraft": "26.1.2",
+  "fabric_loader": "0.19.3",
+  "release_type": "small",
+  "requires_reimport": false,
+  "published_at": "2026-08-31T13:56:32+00:00",
+  "changes": [
+    {
+      "action": "added",
+      "player_operation": "added",
+      "metadata": "mods/refined-storage-jei-integration.pw.toml",
+      "name": "Refined Storage - JEI Integration",
+      "side": "both",
+      "player_action": true,
+      "old": null,
+      "new": {
+        "name": "Refined Storage - JEI Integration",
+        "filename": "refinedstorage-jei-integration-fabric-2.0.1.jar",
+        "side": "both",
+        "source": "modrinth",
+        "download_url": "https://cdn.modrinth.com/data/VzR5wiLo/versions/zyeYfb2E/refinedstorage-jei-integration-fabric-2.0.1.jar",
+        "hash_format": "sha512",
+        "hash": "8be13a2b2ec9117561da3b25f1cbad87a7abecb13083a585d0c4e662b88293369406ab99b79006aeb49db76af5b87248747c27caa8d8fdd838532489767f49c6",
+        "project_url": "https://modrinth.com/mod/VzR5wiLo",
+        "version_url": "https://modrinth.com/mod/VzR5wiLo/version/zyeYfb2E"
+      }
+    }
+  ]
+}

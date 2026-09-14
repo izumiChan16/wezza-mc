@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "pack_version": "26.1.2-r3",
+  "previous_pack_version": "26.1.2-r2",
+  "minecraft": "26.1.2",
+  "fabric_loader": "0.19.3",
+  "release_type": "small",
+  "requires_reimport": false,
+  "published_at": "2026-08-29T15:00:19+00:00",
+  "changes": [
+    {
+      "action": "added",
+      "player_operation": null,
+      "metadata": "mods/chunky.pw.toml",
+      "name": "Chunky",
+      "side": "server",
+      "player_action": false,
+      "old": null,
+      "new": {
+        "name": "Chunky",
+        "filename": "Chunky-Fabric-1.5.3.jar",
+        "side": "server",
+        "source": "modrinth",
+        "download_url": "https://cdn.modrinth.com/data/fALzjamp/versions/4Eotm6ov/Chunky-Fabric-1.5.3.jar",
+        "hash_format": "sha512",
+        "hash": "b83bfe7b218d0aa6232af977ae741dc1f82b10e50cd12bb759f65cf416b8b62beccb543e587ef0b9670abe03815660f8e091bc6823624d65cf07300571573516",
+        "project_url": "https://modrinth.com/mod/fALzjamp",
+        "version_url": "https://modrinth.com/mod/fALzjamp/version/4Eotm6ov"
+      }
+    }
+  ]
+}

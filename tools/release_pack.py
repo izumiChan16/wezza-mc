@@ -17,6 +17,7 @@ import zipfile
 
 
 VERSION_PATTERN = re.compile(r"^(?P<minecraft>.+)-r(?P<revision>[1-9][0-9]*)$")
+HISTORY_SCHEMA = 1
 
 
 def load_toml(path: Path) -> dict:
@@ -220,16 +221,66 @@ def build_changes(old_mods: dict[str, dict], new_mods: dict[str, dict]) -> list[
     return changes
 
 
-def validate_release(pack_dir: Path, release_path: Path) -> list[str]:
+def load_json(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def published_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def validate_release_data(release: object, label: str = "release metadata") -> list[str]:
+    if not isinstance(release, dict):
+        return [f"{label} must be a JSON object"]
+
     errors: list[str] = []
+    if release.get("schema") != 1:
+        errors.append(f"{label}: schema must be 1")
+    pack_version = release.get("pack_version")
+    if not isinstance(pack_version, str) or VERSION_PATTERN.fullmatch(pack_version) is None:
+        errors.append(f"{label}: pack_version must end in -r<positive integer>")
+    previous = release.get("previous_pack_version")
+    if not isinstance(previous, str) or not previous:
+        errors.append(f"{label}: previous_pack_version must be a non-empty string")
+    if not isinstance(release.get("minecraft"), str) or not release.get("minecraft"):
+        errors.append(f"{label}: minecraft must be a non-empty string")
+    if not isinstance(release.get("fabric_loader"), str) or not release.get("fabric_loader"):
+        errors.append(f"{label}: fabric_loader must be a non-empty string")
+    release_type = release.get("release_type")
+    if release_type not in {"small", "full"}:
+        errors.append(f"{label}: release_type must be small or full")
+    if release.get("requires_reimport") is not (release_type == "full"):
+        errors.append(f"{label}: requires_reimport does not match release_type")
+    if published_datetime(release.get("published_at")) is None:
+        errors.append(f"{label}: published_at must be a timezone-aware ISO timestamp")
+    changes = release.get("changes")
+    if not isinstance(changes, list):
+        errors.append(f"{label}: changes must be a list")
+    else:
+        for position, change in enumerate(changes):
+            if not isinstance(change, dict):
+                errors.append(f"{label}: changes[{position}] must be an object")
+            elif not isinstance(change.get("player_action"), bool):
+                errors.append(f"{label}: changes[{position}].player_action must be boolean")
+    return errors
+
+
+def validate_release(pack_dir: Path, release_path: Path) -> list[str]:
     pack = load_toml(pack_dir / "pack.toml")
     try:
-        release = json.loads(release_path.read_text(encoding="utf-8"))
+        release = load_json(release_path)
     except (OSError, json.JSONDecodeError) as exc:
         return [f"{release_path}: cannot read release JSON: {exc}"]
 
-    if release.get("schema") != 1:
-        errors.append("release metadata schema must be 1")
+    errors = validate_release_data(release, str(release_path))
+    if not isinstance(release, dict):
+        return errors
     if release.get("pack_version") != pack.get("version"):
         errors.append("release pack_version does not match pack.toml")
     versions = pack.get("versions", {})
@@ -237,13 +288,135 @@ def validate_release(pack_dir: Path, release_path: Path) -> list[str]:
         errors.append("release Minecraft version does not match pack.toml")
     if release.get("fabric_loader") != versions.get("fabric"):
         errors.append("release Fabric Loader version does not match pack.toml")
-    release_type = release.get("release_type")
-    if release_type not in {"small", "full"}:
-        errors.append("release_type must be small or full")
-    if release.get("requires_reimport") is not (release_type == "full"):
-        errors.append("requires_reimport does not match release_type")
-    if not isinstance(release.get("changes"), list):
-        errors.append("release changes must be a list")
+    return errors
+
+
+def release_summary(release: dict, filename: str) -> dict:
+    changes = release["changes"]
+    player_change_count = sum(change["player_action"] for change in changes)
+    return {
+        "pack_version": release["pack_version"],
+        "previous_pack_version": release["previous_pack_version"],
+        "minecraft": release["minecraft"],
+        "published_at": release["published_at"],
+        "release_type": release["release_type"],
+        "requires_reimport": release["requires_reimport"],
+        "player_change_count": player_change_count,
+        "server_change_count": len(changes) - player_change_count,
+        "file": filename,
+    }
+
+
+def build_history_index(entries: list[tuple[Path, object]]) -> tuple[dict, list[str]]:
+    errors: list[str] = []
+    releases: list[tuple[Path, dict]] = []
+    versions: set[str] = set()
+    for path, release in entries:
+        item_errors = validate_release_data(release, str(path))
+        errors.extend(item_errors)
+        if item_errors or not isinstance(release, dict):
+            continue
+        version = release["pack_version"]
+        expected_name = f"{version}.json"
+        if path.name != expected_name:
+            errors.append(f"{path}: filename must be {expected_name}")
+        if version in versions:
+            errors.append(f"release history contains duplicate version {version}")
+        versions.add(version)
+        releases.append((path, release))
+
+    releases.sort(
+        key=lambda item: published_datetime(item[1]["published_at"]),
+        reverse=True,
+    )
+    for (newer_path, newer), (_, older) in zip(releases, releases[1:]):
+        if newer["previous_pack_version"] != older["pack_version"]:
+            errors.append(
+                f"{newer_path}: previous_pack_version must be {older['pack_version']}"
+            )
+
+    index = {
+        "schema": HISTORY_SCHEMA,
+        "releases": [release_summary(release, path.name) for path, release in releases],
+    }
+    return index, errors
+
+
+def history_entries(history_dir: Path) -> list[tuple[Path, object]]:
+    entries: list[tuple[Path, object]] = []
+    for path in sorted(history_dir.glob("*.json")):
+        if path.name == "index.json":
+            continue
+        try:
+            entries.append((path, load_json(path)))
+        except (OSError, json.JSONDecodeError) as exc:
+            entries.append((path, f"cannot read JSON: {exc}"))
+    return entries
+
+
+def write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def archive_release(release_path: Path, history_dir: Path) -> dict:
+    try:
+        release = load_json(release_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read release JSON {release_path}: {exc}") from exc
+    errors = validate_release_data(release, str(release_path))
+    if errors or not isinstance(release, dict):
+        raise ValueError("; ".join(errors))
+
+    destination = history_dir / f"{release['pack_version']}.json"
+    entries = history_entries(history_dir)
+    existing = next((entry for entry in entries if entry[0] == destination), None)
+    if existing is not None:
+        if existing[1] != release:
+            raise ValueError(f"release history already contains a different {destination.name}")
+    else:
+        entries.append((destination, release))
+
+    index, errors = build_history_index(entries)
+    if errors:
+        raise ValueError("; ".join(errors))
+    write_json(destination, release)
+    write_json(history_dir / "index.json", index)
+    return index
+
+
+def validate_history(current_release_path: Path, history_dir: Path) -> list[str]:
+    try:
+        current = load_json(current_release_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"{current_release_path}: cannot read release JSON: {exc}"]
+    errors = validate_release_data(current, str(current_release_path))
+
+    entries = history_entries(history_dir)
+    expected_index, history_errors = build_history_index(entries)
+    errors.extend(history_errors)
+    if not entries:
+        errors.append(f"{history_dir}: release history is empty")
+
+    index_path = history_dir / "index.json"
+    try:
+        actual_index = load_json(index_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"{index_path}: cannot read history index: {exc}")
+    else:
+        if actual_index != expected_index:
+            errors.append(f"{index_path}: index does not match archived releases")
+
+    if entries and not history_errors:
+        newest_path = history_dir / expected_index["releases"][0]["file"]
+        newest = next(item for path, item in entries if path == newest_path)
+        if newest != current:
+            errors.append("latest archived release does not match current release.json")
     return errors
 
 
@@ -424,6 +597,14 @@ def main() -> int:
     release_check.add_argument("--pack-dir", type=Path, default=Path("pack"))
     release_check.add_argument("--release", type=Path, default=Path("site/release.json"))
 
+    archive = subparsers.add_parser("archive")
+    archive.add_argument("--release", type=Path, default=Path("site/release.json"))
+    archive.add_argument("--history-dir", type=Path, default=Path("site/releases"))
+
+    history_check = subparsers.add_parser("history-check")
+    history_check.add_argument("--release", type=Path, default=Path("site/release.json"))
+    history_check.add_argument("--history-dir", type=Path, default=Path("site/releases"))
+
     version = subparsers.add_parser("version")
     version.add_argument("--pack-dir", type=Path, default=Path("pack"))
 
@@ -451,6 +632,15 @@ def main() -> int:
         if args.command == "release-check":
             errors = validate_release(args.pack_dir.resolve(), args.release.resolve())
             return fail_or_print(errors, "Release metadata validation passed.")
+        if args.command == "archive":
+            index = archive_release(args.release.resolve(), args.history_dir.resolve())
+            print(
+                f"Archived release metadata; history contains {len(index['releases'])} release(s)."
+            )
+            return 0
+        if args.command == "history-check":
+            errors = validate_history(args.release.resolve(), args.history_dir.resolve())
+            return fail_or_print(errors, "Release history validation passed.")
         if args.command == "version":
             print(load_toml(args.pack_dir.resolve() / "pack.toml")["version"])
             return 0

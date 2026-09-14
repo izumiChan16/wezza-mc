@@ -36,6 +36,8 @@ jobs:
           python3 tools/release_pack.py safety --pack-dir pack
           python3 tools/release_pack.py release-check --pack-dir pack \
             --release site/release.json
+          python3 tools/release_pack.py history-check \
+            --release site/release.json --history-dir site/releases
           cp .env.example .env
           cp secrets/aws_credentials.example secrets/aws_credentials
           printf 'ci-only\n' > secrets/rcon_password.txt

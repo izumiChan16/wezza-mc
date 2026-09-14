@@ -144,7 +144,7 @@ GitHub Pages
 | 路径 | 内容 | 是否提交 Git |
 |---|---|---|
 | `pack/` | Packwiz 清单、模组元数据、再分发批准 | 是 |
-| `site/` | Pages 首页、更新页和当前发布记录 | 是 |
+| `site/` | Pages 首页、更新页、当前发布记录和版本历史 | 是 |
 | `tools/` | 清单、MRPACK 和发布校验工具 | 是 |
 | `runtime/data/` | 正式服务器数据和世界 | 否 |
 | `runtime/backups/local/` | 运行期间生成的本机备份 | 否 |
@@ -1054,15 +1054,15 @@ git remote -v
 1. 刷新并校验真实 `pack/`。
 2. 对比隔离测试接受的清单哈希。
 3. 检查当前位于 `main`，并且存在 `origin`。
-4. 拒绝 `pack/` 与 `site/release.json` 之外的未提交文件。
+4. 拒绝 `pack/`、`site/release.json` 与 `site/releases/` 之外的未提交文件。
 5. 对比 `HEAD`，确认确有 Minecraft、Fabric 或模组变化。
 6. 自动计算新版本号。
 7. 生成包含准确文件增删替换信息的 `site/release.json`。
 8. 强制 Minecraft/Fabric 变化使用 `full`。
 9. 再次校验 Packwiz 清单和非 Modrinth 许可。
 10. 构建临时标准 `.mrpack` 并检查依赖、文件、URL、哈希和客户端安装侧。
-11. 把新版本和发布记录写回真实目录。
-12. 只提交 `pack/` 和 `site/release.json`。
+11. 把新版本写回真实目录，并将发布记录归档至 `site/releases/`、重建历史索引。
+12. 校验当前记录、归档详情与历史索引一致，只提交 `pack/` 和这些发布元数据。
 13. 推送当前 `main` 到 `origin`。
 
 它**不会**自动停止或启动正式服务器，也不会替玩家修改 PCL2 实例。
@@ -1125,6 +1125,8 @@ git push origin main
 ```bash
 gh run list --workflow pages.yml --limit 5
 gh run view <运行编号> --log-failed
+python3 tools/release_pack.py history-check \
+  --release site/release.json --history-dir site/releases
 ```
 
 不要为了重试 Pages 再发布一个新整合包版本。先修复工作流或数据问题，提交修复，或在 GitHub Actions 中重跑原工作流。
@@ -1225,7 +1227,8 @@ Pages 工作流监听：
 Pages 工作流会：
 
 - 刷新并校验 Packwiz，要求仓库索引没有漂移。
-- 校验发布记录与 `pack.toml` 版本一致。
+- 校验当前发布记录与 `pack.toml` 版本一致。
+- 校验历史索引、归档详情和版本链一致。
 - 检查非 Modrinth 许可。
 - 生成 `mods.json`。
 - 导出版本化和 `latest` 两份标准 `.mrpack`。
@@ -1599,7 +1602,7 @@ git restore --staged .
 先提交 `pack/` 和发布记录以外的配套变更：
 
 ```bash
-git add -A -- . ':(exclude)pack' ':(exclude)site/release.json'
+git add -A -- . ':(exclude)pack' ':(exclude)site/release.json' ':(exclude)site/releases'
 git commit -m "chore: prepare Minecraft 目标版本"
 ```
 
@@ -1756,6 +1759,7 @@ gh run view <运行编号> --log-failed
 
 - `index.toml` 哈希陈旧。
 - `site/release.json` 与 `pack.toml` 版本不一致。
+- `site/releases/` 索引与归档详情不一致，或版本链断裂。
 - 非 Modrinth 批准过期。
 - MRPACK 导出失败。
 - 工作流语法或依赖问题。
