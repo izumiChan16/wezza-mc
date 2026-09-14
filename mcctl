@@ -42,9 +42,11 @@ Usage: ./mcctl <command>
 
 Server:
   init                         Create .env, secrets, and runtime directories
-  start                        Create a pre-session snapshot and start the server
+  start [--local-auto=on|off] [--s3-auto=on|off]
+                               Start with independent two-hour backup choices (off/on)
   stop [--skip-remote]         Save, back up, and stop safely
-  restart                      Safe stop followed by start
+  restart [--local-auto=on|off] [--s3-auto=on|off]
+                               Choose backups, then safely stop and restart
   status                       Show containers and local addresses
   logs                         Follow production server logs
   console                      Attach to the server console (Ctrl-P Ctrl-Q to detach)
@@ -85,6 +87,10 @@ Staging:
 Backups:
   backup                       Create an online or offline local backup
   backup delete <archive>...   Delete selected local archives (requires --confirm)
+  backup remote                Retry S3 backup (online: limited; stopped: unlimited)
+  backup remote-check          Check S3 inventory and repository access
+  backup remote-init           Validate S3, initialize an empty repository, and enable S3
+  backup status                Show scheduler and recent backup results
   backup-list                  List local archives
   backup-delete <archive>      Alias for 'backup delete' (requires --confirm)
   restore-test <archive>       Extract an archive into runtime/restore-test
@@ -298,10 +304,14 @@ offline_snapshot() {
     archive="${OFFLINE_BACKUP_DIR}/wezza-session-start-${stamp}-${suffix}.tar.zst"
   done
   info "Creating stopped-state snapshot: ${archive#"${ROOT_DIR}"/}"
-  tar --zstd -cf "$archive" \
+  if ! tar --zstd -cf "${archive}.partial" \
     --exclude='./logs' --exclude='./cache' --exclude='./*.tmp' \
-    -C "$DATA_DIR" .
-  prune_offline_backups
+    -C "$DATA_DIR" .; then
+    rm -f -- "${archive}.partial"
+    return 1
+  fi
+  mv -- "${archive}.partial" "$archive" || return 1
+  prune_offline_backups || return 1
   OFFLINE_SNAPSHOT_PATH="$archive"
 }
 
@@ -492,25 +502,81 @@ resolve_backup() {
   esac
 }
 
+backup_control() {
+  python3 "${ROOT_DIR}/tools/backup_control.py" --root "$ROOT_DIR" "$@"
+}
+
+backup_lock() {
+  [[ "${BACKUP_LOCK_HELD:-false}" == true ]] && return 0
+  mkdir -p "${ROOT_DIR}/runtime/backup-control"
+  exec {BACKUP_LOCK_FD}>"${ROOT_DIR}/runtime/backup-control/operation.lock"
+  info "Waiting for any active backup/server operation to finish"
+  flock -x "$BACKUP_LOCK_FD" || die "Could not acquire backup operation lock."
+  BACKUP_LOCK_HELD=true
+}
+
 run_local_backup() {
   service_running minecraft || die "The production server is not running."
-  if ! service_running backup-local; then
-    compose up -d backup-local
-  fi
-  info "Creating an RCON-coordinated local backup"
-  compose exec -T backup-local backup now
+  info "Creating an RCON-coordinated local backup (one shot)"
+  backup_control local
 }
 
 remote_backup_enabled() {
   [[ "${ENABLE_REMOTE_BACKUP:-false}" == "true" ]]
 }
 
+production_running_checked() {
+  local services
+  services="$(compose ps --status running --services)" \
+    || die "Cannot determine Minecraft state; refusing to treat a Docker error as a stopped server."
+  grep -Fxq minecraft <<< "$services"
+}
+
 run_remote_backup() {
-  [[ -n "${RESTIC_REPOSITORY:-}" ]] || die "ENABLE_REMOTE_BACKUP=true but RESTIC_REPOSITORY is empty."
+  [[ -n "${RESTIC_REPOSITORY:-}" ]] || die "RESTIC_REPOSITORY is empty."
   [[ -s "${ROOT_DIR}/secrets/restic_password.txt" ]] || die "Missing restic password secret."
   [[ -s "${ROOT_DIR}/secrets/aws_credentials" ]] || die "Missing S3 credentials secret."
-  info "Creating the encrypted restic/S3 backup"
-  compose --profile remote run --rm --no-deps backup-remote backup now
+  local mode=offline
+  production_running_checked && mode=online
+  info "Creating the encrypted restic/S3 backup ($mode)"
+  backup_control remote "$mode"
+}
+
+select_backup_options() {
+  START_LOCAL_AUTO=""
+  START_S3_AUTO=""
+  local option
+  for option in "$@"; do
+    case "$option" in
+      --local-auto=on|--local-auto=off)
+        [[ -z "$START_LOCAL_AUTO" ]] || die "Specify --local-auto only once."
+        START_LOCAL_AUTO="${option#*=}" ;;
+      --s3-auto=on|--s3-auto=off)
+        [[ -z "$START_S3_AUTO" ]] || die "Specify --s3-auto only once."
+        START_S3_AUTO="${option#*=}" ;;
+      *) die "Usage: ./mcctl start|restart [--local-auto=on|off] [--s3-auto=on|off]" ;;
+    esac
+  done
+  if [[ -t 0 || "${MENU_ACTIVE:-false}" == true ]]; then
+    if [[ -z "$START_LOCAL_AUTO" ]]; then
+      START_LOCAL_AUTO=off
+      if confirm_yes "本次开启每两小时本机备份？"; then START_LOCAL_AUTO=on; fi
+    fi
+    if [[ -z "$START_S3_AUTO" ]]; then
+      START_S3_AUTO=on
+      if ! confirm_default_yes "本次开启每两小时 S3 备份（在线限速 5 MiB/s）？"; then START_S3_AUTO=off; fi
+    fi
+  fi
+  START_LOCAL_AUTO="${START_LOCAL_AUTO:-off}"
+  START_S3_AUTO="${START_S3_AUTO:-on}"
+}
+
+validate_backup_options() {
+  if [[ "$START_S3_AUTO" == on ]]; then
+    remote_backup_enabled || die "S3 is not enabled/ready. Configure it and run 'backup remote-init', or start --s3-auto=off."
+    backup_control remote-check online \
+      || die "S3 is not ready; fix 'backup remote-check' or explicitly start --s3-auto=off."
+  fi
 }
 
 command_init() {
@@ -559,8 +625,13 @@ start_frpc() {
   info "frpc is running; verify the public address from an external client."
 }
 
-command_start() {
-  [[ $# -eq 0 ]] || die "Usage: ./mcctl start"
+command_start() (
+  select_backup_options "$@"
+  backup_lock
+  command_start_locked
+)
+
+command_start_locked() {
   load_settings
   ensure_initialized
   docker_ready
@@ -568,13 +639,15 @@ command_start() {
   [[ "${PACKWIZ_URL:-}" == https://* ]] || die "PACKWIZ_URL must be an HTTPS Pages URL."
   [[ "${PACKWIZ_URL}" != *YOUR_GITHUB_USER* && "${PACKWIZ_URL}" != *example.invalid* ]] \
     || die "Replace the placeholder PACKWIZ_URL in .env."
-  service_running minecraft && die "The production server is already running."
+  production_running_checked && die "The production server is already running."
 
-  offline_snapshot
+  validate_backup_options
+  backup_control session-stop || die "Could not disable the previous backup session."
+  offline_snapshot || die "Pre-session snapshot failed; server was not started."
   # A recreated Minecraft container has a new network namespace.
-  compose stop frpc
+  compose stop frpc backup-local || die "Could not stop old production sidecars."
   info "Recreating production containers to refresh the data mount"
-  compose up -d --force-recreate minecraft backup-local
+  compose up -d --force-recreate minecraft || die "Could not create Minecraft container."
 
   local attempts=0 container_id health
   container_id="$(compose ps -q minecraft)"
@@ -584,6 +657,9 @@ command_start() {
       if ! write_deployment_record; then
         warn "Server is healthy, but the deployment record could not be written."
       fi
+      backup_control session-start "$START_LOCAL_AUTO" "$START_S3_AUTO" \
+        || die "Server started but backup scheduling failed. Stop and restart after inspecting backup status."
+      info "Two-hour backups: local=$START_LOCAL_AUTO / S3=$START_S3_AUTO"
       info "Server is healthy on ${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
       if ! start_frpc; then
         die "Tunnel startup failed; Minecraft and the backup scheduler remain running. Fix frpc, then run 'docker compose up -d --no-deps --force-recreate frpc'."
@@ -601,31 +677,45 @@ command_start() {
   die "Server did not become healthy within three minutes."
 }
 
-command_stop() {
+command_stop() (
+  backup_lock
+  command_stop_locked "$@"
+)
+
+command_stop_locked() {
   [[ $# -eq 0 || ( $# -eq 1 && "$1" == "--skip-remote" ) ]] \
     || die "Usage: ./mcctl stop [--skip-remote]"
   load_settings
   ensure_initialized
   docker_ready
-  if ! service_running minecraft; then
-    compose stop frpc
-    info "The production server is already stopped; any remaining frpc was stopped"
+  backup_control session-stop || die "Could not disable backup scheduling."
+  if ! production_running_checked; then
+    compose stop frpc backup-local
+    info "The production server is already stopped. Retry a failed S3 upload with './mcctl backup remote'."
     return 0
   fi
 
-  local skip_remote=false
+  local skip_remote=false container_id exit_code
   [[ "${1:-}" == "--skip-remote" ]] && skip_remote=true
   compose exec -T minecraft rcon-cli 'say Server stopping in 10 seconds. Saving and backing up...' >/dev/null || true
   sleep 10
-  run_local_backup
+  # Stop legacy schedulers as well; no uncoordinated writers may outlive shutdown.
+  compose stop backup-local || die "Could not stop the old local backup scheduler."
+  compose exec -T minecraft rcon-cli 'save-all flush' >/dev/null \
+    || die "Could not flush world data; server left running."
+  container_id="$(compose ps -q minecraft)"
+  info "Stopping frpc and Minecraft gracefully before the final backups"
+  compose stop frpc || die "Could not stop frpc; server left running."
+  compose stop -t 120 minecraft || die "Minecraft shutdown failed; inspect its state before retrying."
+  production_running_checked && die "Minecraft is still running; refusing an offline backup."
+  exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container_id")"
+  [[ "$exit_code" == 0 ]] || die "Minecraft did not exit cleanly (code $exit_code). Inspect logs before retrying backups."
+  offline_snapshot || die "Local shutdown snapshot failed; server remains stopped. Retry './mcctl backup'."
+  backup_control record local 0 "Shutdown snapshot completed"
 
   if remote_backup_enabled && [[ "$skip_remote" == false ]]; then
-    run_remote_backup || die "Remote backup failed; server left running. Retry or use stop --skip-remote."
+    run_remote_backup || die "Remote backup failed; server remains stopped and the local snapshot was kept. Retry './mcctl backup remote'."
   fi
-
-  info "Stopping frpc, backup scheduler and Minecraft gracefully"
-  compose stop frpc
-  compose stop -t 120 backup-local minecraft
 }
 
 command_status() {
@@ -633,15 +723,19 @@ command_status() {
   load_settings
   docker_ready
   compose --profile staging ps
+  backup_control status
   printf '\nProduction bind: %s:%s\nStaging bind:    127.0.0.1:%s\n' \
     "${MC_BIND_IP:-127.0.0.1}" "${MC_PORT:-25565}" "${STAGING_PORT:-25566}"
 }
 
-command_restart() {
-  [[ $# -eq 0 ]] || die "Usage: ./mcctl restart"
-  command_stop
-  command_start
-}
+command_restart() (
+  select_backup_options "$@"
+  backup_lock
+  load_settings
+  validate_backup_options
+  command_stop_locked || exit $?
+  command_start_locked
+)
 
 command_production_logs() {
   [[ $# -eq 0 ]] || die "Usage: ./mcctl logs"
@@ -675,7 +769,12 @@ command_console() {
   return "$attach_status"
 }
 
-command_world() {
+command_world() (
+  backup_lock
+  command_world_locked "$@"
+)
+
+command_world_locked() {
   local action="${1:-status}"
   shift || true
   load_settings
@@ -1018,7 +1117,12 @@ command_mod() {
   esac
 }
 
-command_stage() {
+command_stage() (
+  backup_lock
+  command_stage_locked "$@"
+)
+
+command_stage_locked() {
   local action="${1:-start}"
   (( $# == 0 )) || shift
   if [[ "$action" == "error" ]]; then
@@ -1225,7 +1329,12 @@ command_backup_list() {
   )
 }
 
-command_backup_delete() {
+command_backup_delete() (
+  backup_lock
+  command_backup_delete_locked "$@"
+)
+
+command_backup_delete_locked() {
   [[ $# -ge 2 && "${!#}" == "--confirm" ]] \
     || die "Usage: ./mcctl backup delete <archive>... --confirm"
   local archive requested deleted=0 has_local=false
@@ -1255,7 +1364,12 @@ command_backup_delete() {
   info "Backup deleted. Remote restic backups, if enabled, were not changed."
 }
 
-command_backup() {
+command_backup() (
+  backup_lock
+  command_backup_locked "$@"
+)
+
+command_backup_locked() {
   local action="${1:-create}"
   case "$action" in
     create)
@@ -1264,13 +1378,51 @@ command_backup() {
       load_settings
       ensure_initialized
       docker_ready
-      if service_running minecraft; then run_local_backup; else offline_snapshot; fi
+      if production_running_checked; then run_local_backup; else offline_snapshot; fi
+      ;;
+    remote|remote-check|remote-init)
+      [[ $# -eq 1 ]] || die "Usage: ./mcctl backup $action"
+      load_settings
+      ensure_initialized
+      docker_ready
+      if [[ "$action" == remote ]]; then
+        run_remote_backup
+      else
+        local mode=offline
+        production_running_checked && mode=online
+        [[ "$action" != remote-init || "$mode" == offline ]] \
+          || die "Stop Minecraft before initializing/testing S3."
+        backup_control "$action" "$mode"
+      fi
+      ;;
+    status)
+      [[ $# -eq 1 ]] || die "Usage: ./mcctl backup status"
+      load_settings
+      backup_control status
+      ;;
+    scheduled)
+      [[ $# -eq 2 ]] || die "Internal scheduled backup requires a session ID."
+      load_settings
+      local flags local_auto s3_auto result=0
+      flags="$(backup_control session-flags "$2")"
+      [[ -n "$flags" ]] || return 0
+      read -r local_auto s3_auto <<< "$flags"
+      # Advance before work, then again after work: failures cannot create a busy retry loop.
+      backup_control session-next "$2"
+      if ! production_running_checked; then
+        backup_control session-stop
+        return 0
+      fi
+      if [[ "$local_auto" == on ]]; then run_local_backup || result=1; fi
+      if [[ "$s3_auto" == on ]]; then run_remote_backup || result=1; fi
+      backup_control session-next "$2"
+      return "$result"
       ;;
     delete)
       shift
       command_backup_delete "$@"
       ;;
-    *) die "Usage: ./mcctl backup [delete <archive> --confirm]" ;;
+    *) die "Usage: ./mcctl backup [remote|remote-check|remote-init|status|delete <archive> --confirm]" ;;
   esac
 }
 
@@ -1286,7 +1438,12 @@ command_restore_test() {
   info "Restored safely to ${target#"${ROOT_DIR}"/}"
 }
 
-command_restore() {
+command_restore() (
+  backup_lock
+  command_restore_locked "$@"
+)
+
+command_restore_locked() {
   [[ $# -eq 2 && "$2" == "--confirm" ]] || die "Usage: ./mcctl restore <archive> --confirm"
   docker_ready
   service_running minecraft && die "Stop the production server before restoring."
@@ -1514,6 +1671,11 @@ dashboard_collect() {
   DASH_PACK_DIRTY=false
   DASH_PACK_ACCEPTED=false
   DASH_BACKUP_USAGE="0 个 · 0 B"
+  DASH_BACKUP_STATUS="两小时备份：本机关 / S3开（下次开服默认）"
+  DASH_S3_CONFIG="未启用"
+  if [[ -f "${ROOT_DIR}/runtime/backup-control/session.json" || -f "${ROOT_DIR}/runtime/backup-control/results.json" ]]; then
+    DASH_BACKUP_STATUS="$(backup_control status 2>/dev/null || printf '备份状态读取失败')"
+  fi
   DASH_STAGING_USAGE="0 B"
   DASH_STAGING_DATASETS=0
   DASH_SESSION_STATE="none"
@@ -1526,6 +1688,7 @@ dashboard_collect() {
 
   if [[ -f "${ROOT_DIR}/.env" ]]; then
     if load_settings; then
+      remote_backup_enabled && DASH_S3_CONFIG="已启用；最近检查见备份状态"
       DASH_PRODUCTION_ADDRESS="${MC_BIND_IP:-127.0.0.1}:${MC_PORT:-25565}"
       if validate_world_config >/dev/null 2>&1 \
         && [[ "${PACKWIZ_URL:-}" == https://* ]] \
@@ -1663,6 +1826,8 @@ Wezza MC 管理面板
 正式服务器    $production_state · $DASH_PRODUCTION_ADDRESS
 整合包维护    $DASH_PACK_VERSION · $DASH_WORKFLOW
 本机备份      $DASH_BACKUP_USAGE
+${DASH_BACKUP_STATUS:-两小时备份：尚无运行记录}
+S3 配置      ${DASH_S3_CONFIG:-未启用}
 测试服数据    $DASH_STAGING_DATASETS 份 · $DASH_STAGING_USAGE · 服务$staging_state
 运行环境      配置$config_state · Docker$docker_state
 ────────────────────────────────────────────────────────────
@@ -2059,6 +2224,10 @@ menu_world_backup() {
       $'restore_test\t测试备份\t解压到隔离的 runtime/restore-test' \
       $'restore\t恢复正式服\t可恢复地替换已停止的正式服数据' \
       $'backup_delete\t删除备份（可多选）\t批量确认；删除后留在备份列表继续清理' \
+      $'backup_status\t自动备份状态\t查看独立开关和最近备份结果' \
+      $'remote_check\t检查 S3 连接\t验证容量读取和仓库密码' \
+      $'remote_init\t验证并启用 S3\t停服时用临时数据验证读写、清理和恢复' \
+      $'remote_backup\t执行 S3 备份\t在线限速，停服后不限速；可重试失败上传' \
       $'__back\t返回\t返回状态总览')"
     case "$selected" in
     world_status) run_menu_command --read "世界状态" command_world status ;;
@@ -2106,6 +2275,10 @@ menu_world_backup() {
       else menu_cancelled; fi
       ;;
     backup_delete) menu_backup_delete ;;
+    backup_status) run_menu_command --read "自动备份状态" command_backup status ;;
+    remote_check) run_menu_command --read "检查 S3 连接" command_backup remote-check ;;
+    remote_init) run_menu_command "验证并启用 S3" command_backup remote-init ;;
+    remote_backup) run_menu_command "执行 S3 备份" command_backup remote ;;
     __back) return 0 ;;
     esac
   done
@@ -2309,6 +2482,7 @@ menu_more_tools() {
 }
 
 command_menu() {
+  MENU_ACTIVE=true
   MENU_PLAIN=false
   MENU_FZF=false
   case "${1:-}" in

@@ -62,6 +62,7 @@ services:
           create_host_path: false
 
   backup-local:
+    command: ["now"]
     image: itzg/mc-backup@sha256:cef928637262946c4988d7128eb3e17dcabc399e22b9c1e9d0297de86949a1cf
     restart: "no"
     depends_on:
@@ -72,12 +73,15 @@ services:
       RCON_HOST: minecraft
       RCON_PASSWORD_FILE: /run/secrets/rcon_password
       BACKUP_NAME: wezza-mc
-      BACKUP_INTERVAL: 2h
-      INITIAL_DELAY: 2h
+      # Scheduling is owned by mcctl; this service only performs one-shot backups.
+      BACKUP_INTERVAL: "0"
+      INITIAL_DELAY: "0"
       BACKUP_ON_STARTUP: "FALSE"
       PAUSE_IF_NO_PLAYERS: "FALSE"
       PRUNE_BACKUPS_DAYS: "14"
       PRUNE_BACKUPS_COUNT: "20"
+      # Propagate tar failures before retention runs; upstream otherwise only logs them.
+      POST_BACKUP_SCRIPT: 'exit "$$1"'
       TAR_COMPRESS_METHOD: zstd
       LINK_LATEST: "TRUE"
       EXCLUDES: "*.jar,cache,logs,*.tmp"
@@ -101,10 +105,10 @@ services:
       RESTIC_PASSWORD_FILE: /run/secrets/restic_password
       RESTIC_REPOSITORY: "${RESTIC_REPOSITORY:-}"
       RESTIC_HOSTNAME: "${RESTIC_HOSTNAME:-wezza-home-pc}"
-      RESTIC_ADDITIONAL_TAGS: "mc_backups session_end"
-      PRUNE_RESTIC_RETENTION: "--keep-daily 14 --keep-weekly 8 --keep-monthly 12"
+      # backup_control supplies tags, retention and per-operation transfer limits.
+      RESTIC_CACHE_DIR: /tmp/restic-cache
       AWS_SHARED_CREDENTIALS_FILE: /run/secrets/aws_credentials
-      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-auto}"
+      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-us-east-1}"
     volumes:
       - ./runtime/data:/data:ro
     secrets:

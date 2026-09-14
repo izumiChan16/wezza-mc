@@ -25,10 +25,18 @@ source "$TEST_ROOT/mcctl"
 load_settings() { EULA=TRUE; PACKWIZ_URL=https://example.org/pack.toml; }
 ensure_initialized() { :; }
 docker_ready() { :; }
-offline_snapshot() { echo snapshot >> "$TEST_ROOT/events"; }
+offline_snapshot() { echo snapshot >> "$TEST_ROOT/events"; [[ "$FAILURE" != local ]]; }
 write_deployment_record() { echo deployment >> "$TEST_ROOT/events"; }
 sleep() { :; }
-docker() { echo healthy; }
+docker() {
+  if [[ "$*" == *ExitCode* ]]; then
+    [[ "$FAILURE" == unclean ]] && echo 137 || echo 0
+  else echo healthy; fi
+}
+backup_control() {
+  echo "control $*" >> "$TEST_ROOT/events"
+  [[ "$FAILURE" != preflight || "$1" != remote-check ]]
+}
 service_running() {
   case "$1" in
     minecraft) [[ "$RUNNING" == true ]] ;;
@@ -36,12 +44,14 @@ service_running() {
     *) return 0 ;;
   esac
 }
+production_running_checked() { service_running minecraft; }
 compose() {
   echo "$*" >> "$TEST_ROOT/events"
   case "$*" in
     'run --rm --no-deps frpc verify -c /etc/frp/frpc.toml') [[ "$FAILURE" != verify ]] ;;
     'up -d --no-deps --force-recreate frpc') [[ "$FAILURE" != up ]] ;;
     'ps -q minecraft') echo minecraft-id ;;
+    'stop -t 120 minecraft') RUNNING=false ;;
     *) return 0 ;;
   esac
 }
@@ -69,8 +79,9 @@ run_remote_backup() {
         result, events = self.run_command("command_start")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(events, [
-            "snapshot", "stop frpc", "up -d --force-recreate minecraft backup-local",
-            "ps -q minecraft", "deployment",
+            "control remote-check online", "control session-stop",
+            "snapshot", "stop frpc backup-local", "up -d --force-recreate minecraft",
+            "ps -q minecraft", "deployment", "control session-start off on",
             "run --rm --no-deps frpc verify -c /etc/frp/frpc.toml",
             "up -d --no-deps --force-recreate frpc",
         ])
@@ -86,26 +97,67 @@ run_remote_backup() {
                 if not config or failure == "verify":
                     self.assertNotIn("up -d --no-deps --force-recreate frpc", events)
 
-    def test_stop_backs_up_before_stopping_tunnel(self) -> None:
+    def test_stop_backs_up_after_stopping_tunnel(self) -> None:
         result, events = self.run_command("command_stop", running=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(events[-4:], [
-            "local-backup", "remote-backup", "stop frpc",
-            "stop -t 120 backup-local minecraft",
+        self.assertEqual(events[-5:], [
+            "stop frpc", "stop -t 120 minecraft", "snapshot",
+            "control record local 0 Shutdown snapshot completed", "remote-backup",
         ])
 
-    def test_backup_failures_preserve_tunnel(self) -> None:
+    def test_backup_failures_leave_server_stopped(self) -> None:
         for failure in ("local", "remote"):
             with self.subTest(failure=failure):
                 result, events = self.run_command("command_stop", running=True, failure=failure)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertNotIn("stop frpc", events)
-                self.assertNotIn("stop -t 120 backup-local minecraft", events)
+                self.assertIn("stop -t 120 minecraft", events)
+                self.assertIn("server remains stopped", result.stderr)
+                if failure == "local":
+                    self.assertNotIn("remote-backup", events)
+
+    def test_all_start_backup_combinations(self) -> None:
+        for local in ("off", "on"):
+            for remote in ("off", "on"):
+                with self.subTest(local=local, remote=remote):
+                    result, events = self.run_command(
+                        f"command_start --local-auto={local} --s3-auto={remote}")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"control session-start {local} {remote}", events)
+                    self.assertEqual("control remote-check online" in events, remote == "on")
+                    self.assertNotIn("up -d --force-recreate minecraft backup-local", events)
+
+    def test_preflight_failure_never_starts_server(self) -> None:
+        result, events = self.run_command("command_start", failure="preflight")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("snapshot", events)
+        self.assertNotIn("stop frpc backup-local", events)
+
+    def test_failed_start_snapshot_never_starts_server(self) -> None:
+        result, events = self.run_command("command_start", failure="local")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("up -d --force-recreate minecraft", events)
+
+    def test_restart_checks_s3_before_stopping(self) -> None:
+        result, events = self.run_command("command_restart", running=True, failure="preflight")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("stop frpc", events)
+
+    def test_failed_shutdown_backup_prevents_restart(self) -> None:
+        result, events = self.run_command("command_restart", running=True, failure="remote")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stop -t 120 minecraft", events)
+        self.assertNotIn("up -d --force-recreate minecraft", events)
+
+    def test_unclean_shutdown_refuses_final_backups(self) -> None:
+        result, events = self.run_command("command_stop", running=True, failure="unclean")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("snapshot", events)
+        self.assertNotIn("remote-backup", events)
 
     def test_stop_cleans_orphan_without_config(self) -> None:
         result, events = self.run_command("command_stop", config=False)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(events, ["stop frpc"])
+        self.assertEqual(events, ["control session-stop", "stop frpc backup-local"])
 
     def test_skip_remote_still_stops_tunnel(self) -> None:
         result, events = self.run_command("command_stop --skip-remote", running=True)

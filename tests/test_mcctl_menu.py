@@ -17,6 +17,7 @@ class McctlMenuTests(unittest.TestCase):
         self.root = Path(self.temp_dir.name)
         shutil.copy2(ROOT / "mcctl", self.root / "mcctl")
         (self.root / "tools").mkdir()
+        shutil.copy2(ROOT / "tools" / "backup_control.py", self.root / "tools" / "backup_control.py")
         shutil.copy2(
             ROOT / "tools" / "staging_session.py",
             self.root / "tools" / "staging_session.py",
@@ -281,7 +282,7 @@ class McctlMenuTests(unittest.TestCase):
         result = self.run_mcctl(
             "menu",
             "--plain",
-            menu_input="1\nq\n",
+            menu_input="1\nn\nn\nq\n",
             extra_env={
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "FAKE_DOCKER_LOG": str(docker_log),
@@ -292,7 +293,8 @@ class McctlMenuTests(unittest.TestCase):
         self.assertNotIn("\n正式服务器\n", result.stderr)
         self.assertIn("✓ 启动正式服务器 完成", result.stdout)
         self.assertGreaterEqual(result.stdout.count("Wezza MC 管理面板"), 2)
-        self.assertIn("up -d --force-recreate minecraft backup-local", docker_log.read_text())
+        self.assertIn("up -d --force-recreate minecraft", docker_log.read_text())
+        self.assertNotIn("up -d --force-recreate minecraft backup-local", docker_log.read_text())
 
     def test_doctor_fails_actionably_in_an_uninitialized_copy(self) -> None:
         result = self.run_mcctl("doctor")
